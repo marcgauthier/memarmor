@@ -4,6 +4,7 @@ package tpm2
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 
 	"github.com/marcgauthier/memarmor/internal/tpm/tpm2/transport"
 )
@@ -655,6 +656,16 @@ func (cmd Hmac) Execute(t transport.TPM, s ...Session) (*HmacResponse, error) {
 type HmacResponse struct {
 	// the returned HMAC in a sized buffer
 	OutHMAC TPM2BDigest
+}
+
+// ExecuteInto authenticates the response and decrypts its output directly
+// into dst, which must have the exact expected length.
+func (cmd Hmac) ExecuteInto(t transport.TPM, dst []byte) error {
+	if len(dst) == 0 {
+		return fmt.Errorf("HMAC destination is empty")
+	}
+	rsp := HmacResponse{OutHMAC: TPM2BDigest{Buffer: dst}}
+	return execute[HmacResponse](t, cmd, &rsp)
 }
 
 // GetRandom is the input to TPM2_GetRandom.

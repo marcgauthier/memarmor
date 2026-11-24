@@ -6,6 +6,7 @@ package tpmutil
 
 import (
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -17,7 +18,8 @@ func libcCall(fn, a1, a2, a3 uintptr) (r1, r2 uintptr, errno syscall.Errno)
 
 var pollTrampoline uintptr
 
-func pollRead(fd *pollFD) syscall.Errno {
-	_, _, errno := libcCall(pollTrampoline, uintptr(unsafe.Pointer(fd)), 1, ^uintptr(0))
-	return errno
+func pollRead(fd *pollFD, remaining time.Duration) (uintptr, syscall.Errno) {
+	millis := min((remaining-1)/time.Millisecond+1, 1<<31-1)
+	n, _, errno := libcCall(pollTrampoline, uintptr(unsafe.Pointer(fd)), 1, uintptr(millis))
+	return n, errno
 }

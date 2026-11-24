@@ -18,6 +18,7 @@ package tpmutil
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -29,9 +30,21 @@ import (
 // returning a header and a body in separate responses.
 const maxTPMResponse = 4096
 
+// CommandTimeout bounds a platform TPM transaction.
+const CommandTimeout = 30 * time.Second
+
+// ErrTimeout reports that the command or its retry budget expired.
+var ErrTimeout = fmt.Errorf("TPM operation timed out: %w", os.ErrDeadlineExceeded)
+
 // RunCommandRaw executes the given raw command and returns the raw response.
 // Does not check the response code except to execute retry logic.
 func RunCommandRaw(rw io.ReadWriter, inb []byte) ([]byte, error) {
+	return RunCommandRawUntil(rw, inb, time.Now().Add(CommandTimeout))
+}
+
+// RunCommandRawUntil uses the same deadline for readiness and retry waits.
+// A native driver can still block inside its write or read syscall.
+func RunCommandRawUntil(rw io.ReadWriter, inb []byte, deadline time.Time) ([]byte, error) {
 	if rw == nil {
 		return nil, errors.New("nil TPM handle")
 	}
@@ -42,15 +55,22 @@ func RunCommandRaw(rw io.ReadWriter, inb []byte) ([]byte, error) {
 	var outb []byte
 
 	for {
-		if _, err := rw.Write(inb); err != nil {
+		if !time.Now().Before(deadline) {
+			return nil, ErrTimeout
+		}
+		n, err := rw.Write(inb)
+		if err != nil {
 			return nil, err
+		}
+		if n != len(inb) {
+			return nil, io.ErrShortWrite
 		}
 
 		// If the TPM is a real device, it may not be ready for reading
 		// immediately after writing the command. Wait until the file
 		// descriptor is ready to be read from.
 		if f, ok := rw.(*os.File); ok {
-			if err := poll(f); err != nil {
+			if err := poll(f, deadline); err != nil {
 				return nil, err
 			}
 		}
@@ -59,6 +79,9 @@ func RunCommandRaw(rw io.ReadWriter, inb []byte) ([]byte, error) {
 		outlen, err := rw.Read(outb)
 		if err != nil {
 			return nil, err
+		}
+		if !time.Now().Before(deadline) {
+			return nil, ErrTimeout
 		}
 		// Resize the buffer to match the amount read from the TPM.
 		outb = outb[:outlen]
@@ -70,13 +93,12 @@ func RunCommandRaw(rw io.ReadWriter, inb []byte) ([]byte, error) {
 
 		// If TPM is busy, retry the command after waiting a few ms.
 		if rh.Res == RCRetry {
-			if backoffFac < 11 {
-				dur := (1 << backoffFac) * time.Millisecond
-				time.Sleep(dur)
-				backoffFac++
-			} else {
-				return nil, err
+			delay := (1 << backoffFac) * time.Millisecond
+			if backoffFac >= 11 || delay >= time.Until(deadline) {
+				return nil, ErrTimeout
 			}
+			time.Sleep(delay)
+			backoffFac++
 		} else {
 			break
 		}

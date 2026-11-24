@@ -4,7 +4,8 @@ package tpmutil
 
 import (
 	"os"
+	"time"
 )
 
 // Not implemented on Windows.
-func poll(_ *os.File) error { return nil }
+func poll(_ *os.File, _ time.Time) error { return nil }

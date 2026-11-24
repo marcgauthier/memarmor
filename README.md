@@ -21,8 +21,6 @@ and authenticated container integrity.
 package main
 
 import (
-	"fmt"
-
 	"github.com/marcgauthier/memarmor"
 )
 
@@ -31,31 +29,29 @@ func main() {
 	memarmor.CatchTermination()
 	defer memarmor.Purge()
 
-	// Optional: bind TPM seals to the measured boot state (PCR 7).
-	// Without this, seals are still bound to the TPM hardware.
-	memarmor.SetTPMSealPolicy([]int{7})
-
-	// Seal a secret string; the input is wiped.
-	secret := memarmor.NewEnclave([]byte("s3cr3t-token"))
+	secret := memarmor.NewEnclaveRandom(32)
+	if secret == nil {
+		panic("could not create secret")
+	}
 	defer secret.Destroy()
 
-	// Seal raw bytes under AES-256-GCM-SIV explicitly.
-	buf := memarmor.NewEnclaveWithCipher([]byte{0x01, 0x02}, memarmor.CipherAES256GCMSIV)
-	defer buf.Destroy()
-
-	// Open when needed, destroy right after use.
 	b, err := secret.Open()
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("token:", b.String())
+	b.WithBytes(func(key []byte) {
+		// Use key here. The slice is borrowed for this callback.
+	})
 	b.Destroy()
 
-	// Evict the session key from RAM between uses (needs a TPM seal).
 	if memarmor.TPMStatus() == memarmor.TPMSealed {
-		_ = memarmor.LockSessionKey()
-		// ... key is out of RAM here ...
-		_ = memarmor.UnlockSessionKey()
+		if err := memarmor.LockSessionKey(); err != nil {
+			panic(err)
+		}
+		// The session key can be restored on demand.
+		if err := memarmor.UnlockSessionKey(); err != nil {
+			panic(err)
+		}
 	}
 }
 ```
@@ -70,23 +66,39 @@ hardware-gated integration test that runs where a TPM 2.0 is accessible.
 ## Features
 
 * Choice of authenticated cipher for sealed data: XSalsa20-Poly1305
-  (default) or AES-256-GCM-SIV (RFC 8452). Ciphertext is self-describing,
-  so either kind always opens.
+  (default) or AES-256-GCM-SIV (RFC 8452). Check `CipherAvailable` before
+  selecting AES-256-GCM-SIV. It requires the hardware AES backend on amd64
+  or arm64 and is unavailable with the `purego` build tag.
 * TPM 2.0 integration: the session key is sealed to the platform TPM when
-  one is available, with optional PCR policy binding, and can be locked
-  (evicted from RAM) and unlocked on demand.
+  one is available. The TPM derives a wrapping key and returns it through an
+  encrypted session. Locking verifies the seal before evicting the live key.
+  Check the error from `SetTPMSealPolicy` when requiring PCR binding. A
+  nonempty policy requires a working TPM when the next session starts.
+  Each platform TPM connection has a 30-second budget. Use
+  `errors.Is(err, memarmor.ErrTPMTimeout)` to identify a timeout.
 * Per-enclave data keys: every sealed container uses a unique data key
   wrapped by the versioned session key, isolating nonces across enclaves.
 * Authenticated streams: chunks are bound to their stream and position,
   and closing a stream commits a length readers use to detect truncation.
-* Memory hygiene: runtime-guaranteed wipes, in-place decryption with no
-  heap plaintext copies, stack-only intermediate digests, and explicit
-  destruction of ciphertext containers.
+  `Write` preserves the input and `WriteAndWipe` explicitly consumes it.
+* Memory hygiene: enclave data keys, associated-data staging, and
+  AES-GCM-SIV key schedules use guarded memory. Decryption writes into
+  guarded buffers. Purge and exit wait for scoped `WithBytes` callbacks.
+  Synchronize raw aliases from `Bytes` and `Reader` with purge and
+  destruction. Formatting a `LockedBuffer` via `String` or `GoString`
+  produces redacted text.
 * Safer API surface: typed views return copies instead of aliasing locked
   memory, copies fail loudly on overflow, and resource exhaustion returns
   errors instead of panicking.
 * No external Go modules. The repository includes the crypto, syscall,
   and TPM code it needs.
+
+Use `RequireMemoryProtection` before handling secrets if your deployment
+requires per-mapping dump exclusion or fork wiping. Check its error and
+abort startup if a required protection is unavailable. Inspect
+`buf.MemoryProtection()` for the outcome on a particular mapping.
+`CoreDumpLimitError` reports the startup process-limit call. It does not
+report crash collector policy or cover copies created by the application.
 
 ## Relation to memguard
 

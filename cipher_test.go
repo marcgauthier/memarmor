@@ -6,6 +6,9 @@ import (
 )
 
 func TestCipherSelection(t *testing.T) {
+	if !CipherAvailable(CipherAES256GCMSIV) {
+		t.Skip("hardware AES is unavailable")
+	}
 	defer SetCipher(CipherXSalsa20Poly1305)
 
 	SetCipher(CipherAES256GCMSIV)

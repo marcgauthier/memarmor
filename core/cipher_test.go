@@ -5,7 +5,13 @@ import (
 	"testing"
 )
 
-var testCiphers = []Cipher{CipherXSalsa20Poly1305, CipherAES256GCMSIV}
+var testCiphers = func() []Cipher {
+	ciphers := []Cipher{CipherXSalsa20Poly1305}
+	if CipherAvailable(CipherAES256GCMSIV) {
+		ciphers = append(ciphers, CipherAES256GCMSIV)
+	}
+	return ciphers
+}()
 
 func TestOverheadFor(t *testing.T) {
 	if OverheadFor(CipherXSalsa20Poly1305) != Overhead {
@@ -94,8 +100,12 @@ func TestDecryptRejects(t *testing.T) {
 
 		for i, bad := range corrupt(x) {
 			n, err := Decrypt(bad, k, dm)
-			if n != 0 || err != ErrDecryptionFailed {
-				t.Errorf("cipher %d case %d: expected decryption failure; got %d, %s", c, i, n, err)
+			expected := ErrDecryptionFailed
+			if len(bad) > 0 && Cipher(bad[0]) == CipherAES256GCMSIV && !CipherAvailable(CipherAES256GCMSIV) {
+				expected = ErrCipherUnavailable
+			}
+			if n != 0 || err != expected {
+				t.Errorf("cipher %d case %d: expected %v; got %d, %v", c, i, expected, n, err)
 			}
 		}
 
@@ -144,6 +154,9 @@ func TestDecryptAvoidsHeapPlaintext(t *testing.T) {
 }
 
 func TestDefaultCipherSelection(t *testing.T) {
+	if !CipherAvailable(CipherAES256GCMSIV) {
+		t.Skip("hardware AES is unavailable")
+	}
 	defer SetDefaultCipher(CipherXSalsa20Poly1305)
 
 	m := make([]byte, 32)

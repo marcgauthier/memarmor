@@ -35,8 +35,8 @@ func SlowRandByte() byte {
 	s := memarmor.NewStream() // Implements io.Reader and io.Writer interfaces.
 
 	// Write the data to it.
-	_, _ = s.Write(data.Bytes()) // Should never error or write less data.
-	data.Destroy()               // No longer need the source buffer. (Has been wiped.)
+	_, _ = s.WriteAndWipe(data.Bytes()) // Should never error or write less data.
+	data.Destroy()                      // No longer need the source buffer. (Has been wiped.)
 
 	// Create a buffer to work on this data in chunks.
 	buf := memarmor.NewBuffer(os.Getpagesize())

@@ -3,7 +3,63 @@ package core
 import (
 	"bytes"
 	"testing"
+	"time"
 )
+
+func TestPurgeWaitsForScopedAccess(t *testing.T) {
+	b, err := NewBuffer(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Destroy()
+	b.Data()[0] = 42
+	entered, release, used, purged := make(chan struct{}), make(chan struct{}), make(chan byte, 1), make(chan struct{})
+	defer func() {
+		if release != nil {
+			close(release)
+		}
+	}()
+	go func() {
+		b.WithBytes(func(data []byte) {
+			close(entered)
+			<-release
+			used <- data[0]
+		})
+	}()
+	<-entered
+	go func() {
+		Purge()
+		close(purged)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		next, err := NewBuffer(1)
+		if err == ErrSessionBusy {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		next.Destroy()
+		if time.Now().After(deadline) {
+			t.Fatal("purge never excluded new work")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	if <-used != 42 {
+		t.Fatal("purge changed the borrowed data before its scope ended")
+	}
+	release = nil
+	select {
+	case <-purged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("purge did not finish")
+	}
+	if b.Alive() {
+		t.Fatal("purge left the buffer alive")
+	}
+}
 
 func TestPurge(t *testing.T) {
 	// Create a bunch of things to simulate a working environment.

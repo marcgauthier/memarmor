@@ -4,6 +4,26 @@ import (
 	"github.com/marcgauthier/memarmor/core"
 )
 
+// MemoryProtectionRequirements lists the mandatory protection settings for guarded allocations.
+type MemoryProtectionRequirements = core.MemoryProtectionRequirements
+
+// MemoryProtectionStatus records per-mapping results returned by LockedBuffer.MemoryProtection.
+type MemoryProtectionStatus = core.MemoryProtectionStatus
+
+// ErrMemoryProtection indicates that a required mapping protection could not be applied.
+var ErrMemoryProtection = core.ErrMemoryProtection
+
+// RequireMemoryProtection sets the process-wide policy for guarded memory.
+// It verifies the requirements before applying them. A zero value restores
+// best-effort mode. Call it outside WithBytes callbacks.
+func RequireMemoryProtection(required MemoryProtectionRequirements) error {
+	return core.RequireMemoryProtection(required)
+}
+
+// CoreDumpLimitError reports the result of setting the process core dump size
+// limit during initialization. Kernel crash collectors can have separate rules.
+func CoreDumpLimitError() error { return core.CoreDumpLimitError() }
+
 /* Enhancement: check for low memory locking limit and print warning?*/
 
 /*
@@ -38,10 +58,16 @@ func GetCipher() Cipher {
 	return core.DefaultCipher()
 }
 
+// CipherAvailable reports whether the selected cipher can run on this host.
+func CipherAvailable(c Cipher) bool { return core.CipherAvailable(c) }
+
 /*
 TPMState describes what is protecting the current session key.
 */
 type TPMState = core.TPMState
+
+// ErrTPMTimeout indicates that a TPM operation exceeded its time budget.
+var ErrTPMTimeout = core.ErrTPMTimeout
 
 const (
 	// TPMUnavailable means no TPM 2.0 is reachable.
@@ -62,11 +88,13 @@ func TPMStatus() TPMState {
 }
 
 /*
-SetTPMSealPolicy selects the PCRs bound into TPM seals of the session key.
-An empty list seals without a PCR policy. It panics on an invalid PCR index.
+SetTPMSealPolicy selects PCRs bound into TPM seals of the session key. A
+nonempty selection requires the TPM for future sessions. With a live key,
+it returns an error if the new seal cannot be verified. It panics on a PCR
+index outside 0–23.
 */
-func SetTPMSealPolicy(pcrs []int) {
-	core.SetTPMSealPolicy(pcrs)
+func SetTPMSealPolicy(pcrs []int) error {
+	return core.SetTPMSealPolicy(pcrs)
 }
 
 /*

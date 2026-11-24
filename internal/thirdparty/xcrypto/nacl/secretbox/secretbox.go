@@ -35,6 +35,7 @@ This package is interoperable with NaCl: https://nacl.cr.yp.to/secretbox.html.
 package secretbox
 
 import (
+	"github.com/marcgauthier/memarmor/internal/memwipe"
 	"github.com/marcgauthier/memarmor/internal/thirdparty/xcrypto/internal/alias"
 	"github.com/marcgauthier/memarmor/internal/thirdparty/xcrypto/internal/poly1305"
 	"github.com/marcgauthier/memarmor/internal/thirdparty/xcrypto/salsa20/salsa"
@@ -75,6 +76,7 @@ func sliceForAppend(in []byte, n int) (head, tail []byte) {
 // distinct message and the output will be Overhead bytes longer than message.
 func Seal(out, message []byte, nonce *[24]byte, key *[32]byte) []byte {
 	var subKey [32]byte
+	defer memwipe.Bytes(subKey[:])
 	var counter [16]byte
 	setup(&subKey, &counter, nonce, key)
 
@@ -82,9 +84,11 @@ func Seal(out, message []byte, nonce *[24]byte, key *[32]byte) []byte {
 	// Salsa20 works with 64-byte blocks, we also generate 32 bytes of
 	// keystream as a side effect.
 	var firstBlock [64]byte
+	defer memwipe.Bytes(firstBlock[:])
 	salsa.XORKeyStream(firstBlock[:], firstBlock[:], &counter, &subKey)
 
 	var poly1305Key [32]byte
+	defer memwipe.Bytes(poly1305Key[:])
 	copy(poly1305Key[:], firstBlock[:])
 
 	ret, out := sliceForAppend(out, len(message)+poly1305.TagSize)
@@ -128,6 +132,7 @@ func Open(out, box []byte, nonce *[24]byte, key *[32]byte) ([]byte, bool) {
 	}
 
 	var subKey [32]byte
+	defer memwipe.Bytes(subKey[:])
 	var counter [16]byte
 	setup(&subKey, &counter, nonce, key)
 
@@ -135,9 +140,11 @@ func Open(out, box []byte, nonce *[24]byte, key *[32]byte) ([]byte, bool) {
 	// Salsa20 works with 64-byte blocks, we also generate 32 bytes of
 	// keystream as a side effect.
 	var firstBlock [64]byte
+	defer memwipe.Bytes(firstBlock[:])
 	salsa.XORKeyStream(firstBlock[:], firstBlock[:], &counter, &subKey)
 
 	var poly1305Key [32]byte
+	defer memwipe.Bytes(poly1305Key[:])
 	copy(poly1305Key[:], firstBlock[:])
 	var tag [poly1305.TagSize]byte
 	copy(tag[:], box)

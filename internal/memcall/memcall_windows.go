@@ -91,5 +91,5 @@ func Protect(b []byte, mpf MemoryProtectionFlag) error {
 	return nil
 }
 
-// DisableCoreDumps is included for compatibility reasons. On windows it is a no-op function.
-func DisableCoreDumps() error { return nil }
+// DisableCoreDumps reports that this backend cannot set a process dump limit.
+func DisableCoreDumps() error { return errors.ErrUnsupported }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	mrand "math/rand"
 	"os"
@@ -843,12 +844,12 @@ func TestEqualTo(t *testing.T) {
 		t.Error("comparison incorrect")
 	}
 	b.Destroy()
-	if b.EqualTo([]byte("yellow submarine")) {
+	if b.EqualTo([]byte("yellow submarine")) || b.EqualTo(nil) {
 		t.Error("comparison with destroyed should be false")
 	}
 	b = newNullBuffer()
-	if !b.EqualTo([]byte{}) {
-		t.Error("buffer should be size zero")
+	if b.EqualTo([]byte{}) {
+		t.Error("comparison with a null buffer should be false")
 	}
 }
 
@@ -897,26 +898,18 @@ func TestReader(t *testing.T) {
 
 func TestString(t *testing.T) {
 	b := NewBufferFromBytes([]byte("yellow submarine"))
-	s := b.String()
-	if s != "yellow submarine" {
-		t.Error("string content mismatch")
-	}
-	// Mutating the buffer must not change the snapshot.
-	b.Melt()
-	for i := range b.Bytes() {
-		b.Bytes()[i] = 'x'
-	}
-	if s != "yellow submarine" {
-		t.Error("string aliases locked memory; expected a copy")
+	for _, format := range []string{"%s", "%q", "%v", "%+v", "%#v", "%x"} {
+		want := "[redacted]"
+		if format != "%#v" {
+			want = fmt.Sprintf(format, want)
+		}
+		if got := fmt.Sprintf(format, b); got != want {
+			t.Errorf("%s did not redact the buffer", format)
+		}
 	}
 	b.Destroy()
-	s = b.String()
-	if s != "" {
-		t.Error("string should be empty")
-	}
-	b = newNullBuffer()
-	if b.String() != "" {
-		t.Error("string should be empty")
+	if b.String() != "[redacted]" || newNullBuffer().String() != "[redacted]" {
+		t.Error("expected redaction after destruction")
 	}
 }
 
@@ -1372,9 +1365,6 @@ func TestTypedViewCopies(t *testing.T) {
 	if got := b.Int64(); len(got) != 8 || got[0] != int64(nativeOrder.Uint64(pattern[:8])) {
 		t.Error("int64 content mismatch")
 	}
-	if s := b.String(); s != string(pattern) {
-		t.Error("string content mismatch")
-	}
 	if a := b.ByteArray8(); a == nil || *a != [8]byte(pattern[:8]) {
 		t.Error("bytearray8 content mismatch")
 	}
@@ -1391,9 +1381,8 @@ func TestTypedViewCopies(t *testing.T) {
 	// Detach: destroying the buffer leaves all copies intact.
 	u := b.Uint64()
 	a := b.ByteArray32()
-	s := b.String()
 	b.Destroy()
-	if u[0] != nativeOrder.Uint64(pattern[:8]) || *a != [32]byte(pattern[:32]) || s != string(pattern) {
+	if u[0] != nativeOrder.Uint64(pattern[:8]) || *a != [32]byte(pattern[:32]) {
 		t.Error("copies did not survive destroy")
 	}
 }

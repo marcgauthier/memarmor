@@ -12,17 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// MemArmor uses 64-bit length comparisons so this file builds on 32-bit Go.
+// MemArmor uses guarded hardware AES schedules and table-free POLYVAL.
 
 // Package gcmsiv implements AES-GCM-SIV, the nonce misuse-resistant
 // authenticated encryption algorithm specified in RFC 8452.
 //
 // It is a pure Go port of the AES-GCM-SIV implementation from AWS-LC
 // (crypto/cipher_extra/e_aesgcmsiv.c), using only the Go standard library.
-// The AES block function comes from crypto/aes (hardware accelerated where
-// the platform supports it); POLYVAL is implemented natively, with direct
-// dot products for short inputs and precomputed multiplication tables for
-// long ones.
+// AES uses hardware instructions and POLYVAL uses direct field multiplication.
 //
 // Supported key sizes are 16 bytes (AEAD_AES_128_GCM_SIV) and 32 bytes
 // (AEAD_AES_256_GCM_SIV). Nonces are 12 bytes and tags are 16 bytes.
@@ -38,8 +35,6 @@
 package gcmsiv
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
@@ -60,110 +55,75 @@ const (
 // Input limits from RFC 8452, Section 6 (mirroring AWS-LC).
 const (
 	maxPlaintextLen = 1 << 36
-	maxADLen        = (1 << 61) - 1
+	maxADLen        = 1 << 36
 )
 
 // errOpen is returned when decryption fails authentication or input
 // limits are exceeded.
 var errOpen = errors.New("gcmsiv: message authentication failed")
 
-// directDotsThreshold is the maximum number of POLYVAL blocks (AD plus
-// plaintext/ciphertext plus the length block) processed with direct dot
-// multiplications. Short inputs skip the table setup this way; longer
-// inputs amortize the tables. Tuned by benchmark (see BenchmarkPolyval*).
-var directDotsThreshold = 14
+// Workspace contains the expanded keys and all secret block scratch. The
+// caller supplies locked memory and wipes it after the operation.
+type Workspace struct {
+	master          aesBlock
+	record          aesBlock
+	decryptSchedule [60]uint32
+	blocks          [3][16]byte
+	material        [48]byte
+}
 
-// gcmsiv is a cipher.AEAD implementing AES-GCM-SIV. It holds only the
-// expanded master key; per-message keys and POLYVAL tables are derived per
-// call, so a single instance is safe for concurrent use.
+type aesBlock struct {
+	rounds int
+	enc    [60]uint32
+}
+
+func (c *aesBlock) expand(key []byte, dec *[60]uint32) {
+	c.rounds = len(key)/4 + 6
+	expandKeyAsm(c.rounds, &key[0], &c.enc[0], &dec[0])
+}
+
+func (c *aesBlock) encrypt(dst, src *[16]byte) {
+	encryptBlockAsm(c.rounds, &c.enc[0], &dst[0], &src[0])
+}
+
 type gcmsiv struct {
-	master cipher.Block
-	is256  bool
+	work    *Workspace
+	keySize int
 }
 
-var _ cipher.AEAD = (*gcmsiv)(nil)
-
-// New returns a cipher.AEAD implementing AES-GCM-SIV with the given key.
-// The key must be 16 bytes (AES-128-GCM-SIV) or 32 bytes (AES-256-GCM-SIV).
-func New(key []byte) (cipher.AEAD, error) {
-	switch len(key) {
-	case KeySize128, KeySize256:
-	default:
-		return nil, errors.New("gcmsiv: invalid key size (want 16 or 32 bytes)")
+// New initializes an operation in work. The workspace is single-use.
+func New(key []byte, work *Workspace) (*gcmsiv, error) {
+	if len(key) != KeySize128 && len(key) != KeySize256 {
+		return nil, errors.New("gcmsiv: invalid key size")
 	}
-	master, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
+	if !Available() {
+		return nil, errors.New("gcmsiv: hardware AES is unavailable")
 	}
-	return &gcmsiv{master: master, is256: len(key) == KeySize256}, nil
+	work.master.expand(key, &work.decryptSchedule)
+	return &gcmsiv{work: work, keySize: len(key)}, nil
 }
 
-// NonceSize returns the required nonce size in bytes.
-func (g *gcmsiv) NonceSize() int { return NonceSize }
-
-// Overhead returns the tag size in bytes.
-func (g *gcmsiv) Overhead() int { return TagSize }
-
-// scratchPad holds the 16-byte scratch blocks a Seal/Open call needs. It is
-// threaded through the call chain so the blocks escape to the heap once,
-// together, instead of once each at every cipher.Block call.
-type scratchPad struct {
-	buf [3][16]byte
-}
-
-// deriveKeys runs the AES-GCM-SIV key derivation (RFC 8452, Section 4):
-// it encrypts counter blocks holding the nonce with the master key,
-// keeping 8 bytes of each ciphertext. It writes the POLYVAL authentication
-// key to auth and returns the record encryption block cipher. counter and
-// ct are scratch space.
-func (g *gcmsiv) deriveKeys(nonce []byte, auth, counter, ct *[16]byte) cipher.Block {
+func (g *gcmsiv) deriveKeys(nonce []byte) {
+	w := g.work
+	counter, ct := &w.blocks[0], &w.blocks[1]
 	copy(counter[4:], nonce)
-	clear(counter[1:4]) // counter is reused scratch; bytes 1..3 must be zero
-	blocks := 4
-	if g.is256 {
-		blocks = 6
-	}
-	var material [48]byte
-	for i := 0; i < blocks; i++ {
+	clear(counter[1:4])
+	for i := range (16 + g.keySize) / 8 {
 		counter[0] = byte(i)
-		g.master.Encrypt(ct[:], counter[:])
-		copy(material[i*8:], ct[:8])
+		w.master.encrypt(ct, counter)
+		copy(w.material[i*8:], ct[:8])
 	}
-	copy(auth[:], material[:16])
-	// The key length is 16 or 32 by construction, so NewCipher cannot fail.
-	enc, _ := aes.NewCipher(material[16 : 16+g.encKeyLen()])
-	return enc
-}
-
-func (g *gcmsiv) encKeyLen() int {
-	if g.is256 {
-		return KeySize256
-	}
-	return KeySize128
+	w.record.expand(w.material[16:16+g.keySize], &w.decryptSchedule)
 }
 
 // auth computes the AES-GCM-SIV tag over plaintext and additional data
 // (RFC 8452, Sections 3 and 4) and writes it to tag.
-func auth(enc cipher.Block, authKey *[16]byte, nonce, plaintext, ad []byte, tag *[16]byte) {
-	h := loadField(authKey[:])
-	dots := len(ad)/16 + len(plaintext)/16 + 1
-	if len(ad)&15 != 0 {
-		dots++
-	}
-	if len(plaintext)&15 != 0 {
-		dots++
-	}
-	var s field
-	if dots <= directDotsThreshold {
-		s = polyvalDirect(h, ad, plaintext)
-	} else {
-		s = polyval(dotKey(h), ad, plaintext)
-	}
-	s.store(tag[:])
+func auth(enc *aesBlock, authKey, nonce, plaintext, ad []byte, tag *[16]byte) {
+	polyvalDirect(loadField(authKey), ad, plaintext).store(tag[:])
 	binary.LittleEndian.PutUint64(tag[:], binary.LittleEndian.Uint64(tag[:])^binary.LittleEndian.Uint64(nonce))
 	binary.LittleEndian.PutUint32(tag[8:], binary.LittleEndian.Uint32(tag[8:])^binary.LittleEndian.Uint32(nonce[8:]))
 	tag[15] &= 0x7f
-	enc.Encrypt(tag[:], tag[:])
+	enc.encrypt(tag, tag)
 }
 
 // crypt encrypts or decrypts in with the record key in AES-GCM-SIV counter
@@ -171,11 +131,11 @@ func auth(enc cipher.Block, authKey *[16]byte, nonce, plaintext, ad []byte, tag 
 // only the first four bytes advance, little-endian, wrapping modulo 2^32.
 // in and out may be the same slice but must not otherwise overlap.
 // counter and ks are scratch space.
-func crypt(out, in []byte, tag *[16]byte, enc cipher.Block, counter, ks *[16]byte) {
+func crypt(out, in []byte, tag *[16]byte, enc *aesBlock, counter, ks *[16]byte) {
 	copy(counter[:], tag[:])
 	counter[15] |= 0x80
 	for len(in) >= 16 {
-		enc.Encrypt(ks[:], counter[:])
+		enc.encrypt(ks, counter)
 		binary.LittleEndian.PutUint32(counter[:], binary.LittleEndian.Uint32(counter[:])+1)
 		binary.LittleEndian.PutUint64(out, binary.LittleEndian.Uint64(in)^binary.LittleEndian.Uint64(ks[:]))
 		binary.LittleEndian.PutUint64(out[8:], binary.LittleEndian.Uint64(in[8:])^binary.LittleEndian.Uint64(ks[8:]))
@@ -183,7 +143,7 @@ func crypt(out, in []byte, tag *[16]byte, enc cipher.Block, counter, ks *[16]byt
 		out = out[16:]
 	}
 	if len(in) > 0 {
-		enc.Encrypt(ks[:], counter[:])
+		enc.encrypt(ks, counter)
 		for i := range in {
 			out[i] = in[i] ^ ks[i]
 		}
@@ -204,13 +164,12 @@ func (g *gcmsiv) Seal(dst, nonce, plaintext, ad []byte) []byte {
 	if uint64(len(ad)) > maxADLen {
 		panic("gcmsiv: additional data too large")
 	}
-	var authKey [16]byte
-	var sc scratchPad
-	enc := g.deriveKeys(nonce, &authKey, &sc.buf[0], &sc.buf[1])
-	auth(enc, &authKey, nonce, plaintext, ad, &sc.buf[2])
+	w := g.work
+	g.deriveKeys(nonce)
+	auth(&w.record, w.material[:16], nonce, plaintext, ad, &w.blocks[2])
 	ret, out := sliceForAppend(dst, len(plaintext)+TagSize)
-	crypt(out[:len(plaintext)], plaintext, &sc.buf[2], enc, &sc.buf[0], &sc.buf[1])
-	copy(out[len(plaintext):], sc.buf[2][:])
+	crypt(out[:len(plaintext)], plaintext, &w.blocks[2], &w.record, &w.blocks[0], &w.blocks[1])
+	copy(out[len(plaintext):], w.blocks[2][:])
 	return ret
 }
 
@@ -226,23 +185,17 @@ func (g *gcmsiv) Open(dst, nonce, ciphertext, ad []byte) ([]byte, error) {
 		return nil, errOpen
 	}
 	in, claimed := ciphertext[:len(ciphertext)-TagSize], ciphertext[len(ciphertext)-TagSize:]
-	// AWS-LC tolerates 2^36+16 bytes here so overlong inputs fail
-	// authentication rather than tripping the length check first.
-	if uint64(len(in)) > maxPlaintextLen+16 {
+	if uint64(len(in)) > maxPlaintextLen || uint64(len(ad)) > maxADLen {
 		return nil, errOpen
 	}
-	if uint64(len(ad)) > maxADLen {
-		return nil, errOpen
-	}
-	var authKey [16]byte
-	var sc scratchPad
-	enc := g.deriveKeys(nonce, &authKey, &sc.buf[0], &sc.buf[1])
+	w := g.work
+	g.deriveKeys(nonce)
 	var tag [16]byte
 	copy(tag[:], claimed)
 	ret, out := sliceForAppend(dst, len(in))
-	crypt(out, in, &tag, enc, &sc.buf[0], &sc.buf[1])
-	auth(enc, &authKey, nonce, out, ad, &sc.buf[2])
-	if subtle.ConstantTimeCompare(sc.buf[2][:], tag[:]) != 1 {
+	crypt(out, in, &tag, &w.record, &w.blocks[0], &w.blocks[1])
+	auth(&w.record, w.material[:16], nonce, out, ad, &w.blocks[2])
+	if subtle.ConstantTimeCompare(w.blocks[2][:], tag[:]) != 1 {
 		// Zero the unauthenticated plaintext before failing.
 		for i := range out {
 			out[i] = 0

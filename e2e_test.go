@@ -16,6 +16,9 @@ func TestEndToEndLifecycle(t *testing.T) {
 	defer SetCipher(CipherXSalsa20Poly1305)
 
 	for _, c := range []Cipher{CipherXSalsa20Poly1305, CipherAES256GCMSIV} {
+		if !CipherAvailable(c) {
+			continue
+		}
 		SetCipher(c)
 		Purge() // fresh session per cipher
 		lifecycle(t)

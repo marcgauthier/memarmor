@@ -3,6 +3,7 @@ package memarmor
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"os"
 	"unsafe"
@@ -78,33 +79,33 @@ func NewBufferFromBytes(src []byte) *LockedBuffer {
 /*
 NewBufferFromReader reads some number of bytes from an io.Reader into an immutable LockedBuffer.
 
-An error is returned precisely when the number of bytes read is less than the requested amount. Any data read is returned in either case.
+Read errors can return a buffer with partial data. Allocation failures and
+session transitions also return an error.
 */
 func NewBufferFromReader(r io.Reader, size int) (*LockedBuffer, error) {
-	// Construct a buffer of the provided size.
-	b := NewBuffer(size)
-	if b.Size() == 0 {
-		return b, nil
+	if size < 1 {
+		return newNullBuffer(), nil
 	}
-
-	// Attempt to fill it with data from the Reader.
-	if n, err := io.ReadFull(r, b.Bytes()); err != nil {
-		if n == 0 {
-			// nothing was read
+	b, err := newReaderBuffer(size)
+	if err != nil {
+		return newNullBuffer(), err
+	}
+	keep := false
+	defer func() {
+		if !keep {
 			b.Destroy()
-			return newNullBuffer(), err
 		}
+	}()
 
-		// partial read
-		d := NewBuffer(n)
-		d.Copy(b.Bytes()[:n])
-		d.Freeze()
-		b.Destroy()
-		return d, err
+	var n int
+	if !b.Buffer.WithBytes(func(dst []byte) { n, err = io.ReadFull(r, dst) }) {
+		return newNullBuffer(), bufferViewError(b)
 	}
-
-	// success
+	if err != nil {
+		return finishReaderBuffer(b, n, err)
+	}
 	b.Freeze()
+	keep = true
 	return b, nil
 }
 
@@ -114,55 +115,37 @@ NewBufferFromReaderUntil constructs an immutable buffer containing data sourced 
 If an error is encountered before the delimiter value, the error will be returned along with the data read up until that point.
 */
 func NewBufferFromReaderUntil(r io.Reader, delim byte) (*LockedBuffer, error) {
-	// Construct a buffer with a data page that fills an entire memory page.
-	b := NewBuffer(os.Getpagesize())
+	b, err := newReaderBuffer(os.Getpagesize())
+	if err != nil {
+		return newNullBuffer(), err
+	}
+	defer func() { b.Destroy() }()
 
-	// Loop over the buffer a byte at a time.
-	for i := 0; ; i++ {
-		// If we have filled this buffer...
-		if i == b.Size() {
-			// Construct a new buffer that is a page size larger.
-			c := NewBuffer(b.Size() + os.Getpagesize())
-
-			// Copy the data over.
-			c.Copy(b.Bytes())
-
-			// Destroy the old one and reassign its variable.
-			b.Destroy()
-			b = c
-		}
-
-		// Attempt to read a single byte.
-		n, err := r.Read(b.Bytes()[i : i+1])
-		if n != 1 { // if we did not read a byte
-			if err == nil { // and there was no error
-				i-- // try again
-				continue
-			}
-			// if instead there was an error, we're done early
-			if i == 0 { // no data read
-				b.Destroy()
+	for i := 0; ; {
+		if size := b.Size(); i == size {
+			next, err := copyReaderBuffer(b, i, size+os.Getpagesize())
+			if err != nil {
 				return newNullBuffer(), err
 			}
-			d := NewBuffer(i)
-			d.Copy(b.Bytes()[:i])
-			d.Freeze()
 			b.Destroy()
-			return d, err
+			b = next
 		}
-		// we managed to read a byte, check if it was the delimiter
-		// note that errors are ignored in this case where we got data
-		if b.Bytes()[i] == delim {
-			if i == 0 {
-				// if first byte was delimiter, there's no data to return
-				b.Destroy()
-				return newNullBuffer(), nil
-			}
-			d := NewBuffer(i)
-			d.Copy(b.Bytes()[:i])
-			d.Freeze()
-			b.Destroy()
-			return d, nil
+
+		var n int
+		var matched bool
+		if !b.Buffer.WithBytes(func(dst []byte) {
+			n, err = r.Read(dst[i : i+1])
+			matched = n == 1 && dst[i] == delim
+		}) {
+			return newNullBuffer(), bufferViewError(b)
+		}
+		if matched {
+			return finishReaderBuffer(b, i, nil)
+		}
+		if n == 1 {
+			i++
+		} else if err != nil {
+			return finishReaderBuffer(b, i, err)
 		}
 	}
 }
@@ -170,54 +153,84 @@ func NewBufferFromReaderUntil(r io.Reader, delim byte) (*LockedBuffer, error) {
 /*
 NewBufferFromEntireReader reads from an io.Reader into an immutable buffer. It will continue reading until EOF.
 
-A nil error is returned precisely when we managed to read all the way until EOF. Any data read is returned in either case.
+A nil error indicates that the reader reached EOF. Read errors can return
+partial data. Allocation failures and session transitions return an error.
 */
 func NewBufferFromEntireReader(r io.Reader) (*LockedBuffer, error) {
-	// Create a buffer with a data region of one page size.
-	b := NewBuffer(os.Getpagesize())
+	b, err := newReaderBuffer(os.Getpagesize())
+	if err != nil {
+		return newNullBuffer(), err
+	}
+	defer func() { b.Destroy() }()
 
 	for read := 0; ; {
-		// Attempt to read some data from the reader.
-		n, err := r.Read(b.Bytes()[read:])
-
-		// Nothing read but no error, try again.
-		if n == 0 && err == nil {
-			continue
+		var n int
+		var size int
+		if !b.Buffer.WithBytes(func(dst []byte) {
+			size = len(dst)
+			n, err = r.Read(dst[read:])
+		}) {
+			return newNullBuffer(), bufferViewError(b)
 		}
-
-		// 1) so either have data and no error
-		// 2) or have error and no data
-		// 3) or both have data and have error
-
-		// Increment the read count by the number of bytes that we just read.
 		read += n
-
 		if err != nil {
-			// Suppress EOF error
 			if err == io.EOF {
 				err = nil
 			}
-			// We're done, return the data.
-			if read == 0 {
-				// No data read.
-				b.Destroy()
+			return finishReaderBuffer(b, read, err)
+		}
+		if read == size {
+			next, err := copyReaderBuffer(b, read, size+os.Getpagesize())
+			if err != nil {
 				return newNullBuffer(), err
 			}
-			d := NewBuffer(read)
-			d.Copy(b.Bytes()[:read])
-			d.Freeze()
 			b.Destroy()
-			return d, err
-		}
-
-		// If we've filled this buffer, grow it by another page size.
-		if len(b.Bytes()[read:]) == 0 {
-			d := NewBuffer(b.Size() + os.Getpagesize())
-			d.Copy(b.Bytes())
-			b.Destroy()
-			b = d
+			b = next
 		}
 	}
+}
+
+func newReaderBuffer(size int) (*LockedBuffer, error) {
+	buf, err := core.NewBuffer(size)
+	if err != nil {
+		return nil, err
+	}
+	return newBuffer(buf), nil
+}
+
+func finishReaderBuffer(b *LockedBuffer, n int, readErr error) (*LockedBuffer, error) {
+	if n == 0 {
+		return newNullBuffer(), readErr
+	}
+	result, err := copyReaderBuffer(b, n, n)
+	if err != nil {
+		return newNullBuffer(), errors.Join(readErr, err)
+	}
+	result.Freeze()
+	return result, readErr
+}
+
+func copyReaderBuffer(src *LockedBuffer, n, size int) (*LockedBuffer, error) {
+	dst, err := newReaderBuffer(size)
+	if err != nil {
+		return nil, err
+	}
+	if !src.Buffer.WithBytes(func(data []byte) { dst.Copy(data[:n]) }) {
+		dst.Destroy()
+		return nil, bufferViewError(src)
+	}
+	if !dst.IsAlive() {
+		dst.Destroy()
+		return nil, core.ErrBufferExpired
+	}
+	return dst, nil
+}
+
+func bufferViewError(b *LockedBuffer) error {
+	if b.IsAlive() {
+		return core.ErrSessionBusy
+	}
+	return core.ErrBufferExpired
 }
 
 /*
@@ -268,7 +281,7 @@ A nil enclave is also returned when memory resources are exhausted.
 func (b *LockedBuffer) SealWithCipher(c Cipher) *Enclave {
 	e, err := core.SealWithCipher(b.Buffer, c)
 	if err != nil {
-		if err == core.ErrBufferExpired || core.IsResourceError(err) {
+		if err == core.ErrBufferExpired || isEnclaveOperationError(err) {
 			return nil
 		}
 		core.Panic(err)
@@ -287,14 +300,13 @@ func (b *LockedBuffer) Copy(src []byte) {
 CopyAt copies src into a LockedBuffer at an offset. It panics on an out-of-range offset or if src does not fit. Move is preferred if the source is not also a LockedBuffer or if the source is no longer needed.
 */
 func (b *LockedBuffer) CopyAt(offset int, src []byte) {
-	if !b.IsAlive() {
-		return
-	}
-
 	b.Lock()
 	defer b.Unlock()
 
 	dst := b.Bytes()
+	if len(dst) == 0 {
+		return
+	}
 	if offset < 0 || offset > len(dst) {
 		panic("<memarmor> copy offset out of range")
 	}
@@ -315,14 +327,13 @@ func (b *LockedBuffer) Move(src []byte) {
 MoveAt moves src into a LockedBuffer at an offset. It panics on an out-of-range offset or if src does not fit. The source is wiped after the bytes are copied.
 */
 func (b *LockedBuffer) MoveAt(offset int, src []byte) {
-	if !b.IsAlive() {
-		return
-	}
-
 	b.Lock()
 	defer b.Unlock()
 
 	dst := b.Bytes()
+	if len(dst) == 0 {
+		return
+	}
 	if offset < 0 || offset > len(dst) {
 		panic("<memarmor> move offset out of range")
 	}
@@ -361,7 +372,7 @@ func (b *LockedBuffer) Wipe() {
 Size gives you the length of a given LockedBuffer's data segment. A destroyed LockedBuffer will have a size of zero.
 */
 func (b *LockedBuffer) Size() int {
-	return len(b.Bytes())
+	return b.Buffer.Size()
 }
 
 /*
@@ -396,7 +407,8 @@ func (b *LockedBuffer) EqualTo(buf []byte) bool {
 	b.RLock()
 	defer b.RUnlock()
 
-	return core.Equal(b.Bytes(), buf)
+	data := b.Bytes()
+	return len(data) != 0 && core.Equal(data, buf)
 }
 
 /*
@@ -406,7 +418,8 @@ func (b *LockedBuffer) EqualTo(buf []byte) bool {
 /*
 Bytes returns a byte slice referencing the protected region of memory. The
 slice is only valid while the buffer is alive: it must not be used after
-Destroy, and Destroy must not run concurrently with its use.
+Destroy or Purge. The caller must synchronize their use of this raw alias
+with destruction and session purging.
 */
 func (b *LockedBuffer) Bytes() []byte {
 	return b.Buffer.Data()
@@ -415,16 +428,12 @@ func (b *LockedBuffer) Bytes() []byte {
 /*
 WithBytes runs fn with the protected region while holding the buffer's read
 lock, so the view is stable for the call. The slice must not be retained
-after fn returns, and fn must not call back into operations that destroy or
-re-lock this buffer.
+after fn returns. fn must not destroy or re-lock this buffer, or start a
+session transition such as Purge, SafeExit, SafePanic, or LockSessionKey.
+The callback is skipped if the buffer has expired or a transition is pending.
 */
 func (b *LockedBuffer) WithBytes(fn func([]byte)) {
-	if !b.IsAlive() {
-		return
-	}
-	b.RLock()
-	defer b.RUnlock()
-	fn(b.Bytes())
+	b.Buffer.WithBytes(fn)
 }
 
 /*
@@ -434,17 +443,12 @@ func (b *LockedBuffer) Reader() *bytes.Reader {
 	return bytes.NewReader(b.Bytes())
 }
 
-/*
-String returns a copy of the protected region as a string.
-*/
-func (b *LockedBuffer) String() string {
-	if !b.IsAlive() {
-		return ""
-	}
-	b.RLock()
-	defer b.RUnlock()
-	return string(b.Bytes())
-}
+// String returns a redacted representation suitable for formatting and logs.
+// Use WithBytes to access the protected bytes explicitly.
+func (b *LockedBuffer) String() string { return "[redacted]" }
+
+// GoString redacts the buffer when formatted with %#v.
+func (b *LockedBuffer) GoString() string { return b.String() }
 
 /*
 Uint16 returns a copy of the protected region with the data represented as a sequence of unsigned 16 bit integers. Its length will be half that of the byte slice, excluding any remaining part that doesn't form a complete uint16 value.
@@ -462,7 +466,7 @@ func (b *LockedBuffer) Uint16() []uint16 {
 	defer b.RUnlock()
 
 	// Compute size of new slice representation.
-	size := b.Size() / 2
+	size := len(b.Bytes()) / 2
 	if size < 1 {
 		return nil
 	}
@@ -491,7 +495,7 @@ func (b *LockedBuffer) Uint32() []uint32 {
 	defer b.RUnlock()
 
 	// Compute size of new slice representation.
-	size := b.Size() / 4
+	size := len(b.Bytes()) / 4
 	if size < 1 {
 		return nil
 	}
@@ -520,7 +524,7 @@ func (b *LockedBuffer) Uint64() []uint64 {
 	defer b.RUnlock()
 
 	// Compute size of new slice representation.
-	size := b.Size() / 8
+	size := len(b.Bytes()) / 8
 	if size < 1 {
 		return nil
 	}
@@ -547,7 +551,7 @@ func (b *LockedBuffer) Int8() []int8 {
 	defer b.RUnlock()
 
 	// Copy out byte by byte.
-	out := make([]int8, b.Size())
+	out := make([]int8, len(b.Bytes()))
 	for i := range out {
 		out[i] = int8(b.Bytes()[i])
 	}
@@ -570,7 +574,7 @@ func (b *LockedBuffer) Int16() []int16 {
 	defer b.RUnlock()
 
 	// Compute size of new slice representation.
-	size := b.Size() / 2
+	size := len(b.Bytes()) / 2
 	if size < 1 {
 		return nil
 	}
@@ -599,7 +603,7 @@ func (b *LockedBuffer) Int32() []int32 {
 	defer b.RUnlock()
 
 	// Compute size of new slice representation.
-	size := b.Size() / 4
+	size := len(b.Bytes()) / 4
 	if size < 1 {
 		return nil
 	}
@@ -628,7 +632,7 @@ func (b *LockedBuffer) Int64() []int64 {
 	defer b.RUnlock()
 
 	// Compute size of new slice representation.
-	size := b.Size() / 8
+	size := len(b.Bytes()) / 8
 	if size < 1 {
 		return nil
 	}

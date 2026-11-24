@@ -1,6 +1,7 @@
 package memcall
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -38,7 +39,7 @@ func TestCycle(t *testing.T) {
 	if err := Free(buffer); err != nil {
 		t.Error(err)
 	}
-	if err := DisableCoreDumps(); err != nil {
+	if err := DisableCoreDumps(); err != nil && !errors.Is(err, errors.ErrUnsupported) {
 		t.Error(err)
 	}
 }

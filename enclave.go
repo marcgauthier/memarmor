@@ -1,8 +1,17 @@
 package memarmor
 
 import (
+	"errors"
+
 	"github.com/marcgauthier/memarmor/core"
 )
+
+func isEnclaveOperationError(err error) bool {
+	return err == core.ErrSessionLocked || err == core.ErrSessionBusy ||
+		err == core.ErrCipherUnavailable || errors.Is(err, core.ErrTPMPolicy) ||
+		errors.Is(err, core.ErrMemoryProtection) ||
+		core.IsResourceError(err)
+}
 
 /*
 Enclave is a sealed and encrypted container for sensitive data.
@@ -21,12 +30,14 @@ func NewEnclave(src []byte) *Enclave {
 }
 
 /*
-NewEnclaveWithCipher seals up some data into an encrypted enclave object using the given cipher. The buffer is wiped after the data is copied. If the length of the buffer is zero, the session key is locked in the TPM, or memory resources are exhausted, the function will return nil.
+NewEnclaveWithCipher seals data using the given cipher and wipes src on
+success. It returns nil for empty input, an unavailable cipher, an unavailable
+session, or insufficient memory resources.
 */
 func NewEnclaveWithCipher(src []byte, c Cipher) *Enclave {
 	e, err := core.NewEnclaveWithCipher(src, c)
 	if err != nil {
-		if err == core.ErrNullEnclave || err == core.ErrSessionLocked || core.IsResourceError(err) {
+		if err == core.ErrNullEnclave || isEnclaveOperationError(err) {
 			return nil
 		}
 		core.Panic(err)
@@ -40,6 +51,7 @@ NewEnclaveRandom generates and seals arbitrary amounts of cryptographically-secu
 func NewEnclaveRandom(size int) *Enclave {
 	// todo: stream data into enclave
 	b := NewBufferRandom(size)
+	defer b.Destroy()
 	return b.Seal()
 }
 
@@ -51,7 +63,7 @@ returns nil for empty input, a locked session, or exhausted memory resources.
 func NewEnclaveWithAD(src, ad []byte) *Enclave {
 	e, err := core.NewEnclaveAD(src, ad)
 	if err != nil {
-		if err == core.ErrNullEnclave || err == core.ErrSessionLocked || core.IsResourceError(err) {
+		if err == core.ErrNullEnclave || isEnclaveOperationError(err) {
 			return nil
 		}
 		core.Panic(err)
@@ -66,7 +78,7 @@ associated data against caller-supplied expected bytes.
 func (e *Enclave) OpenWithAD(ad []byte) (*LockedBuffer, error) {
 	b, err := core.OpenAD(e.Enclave, ad)
 	if err != nil {
-		if err != core.ErrDecryptionFailed && err != core.ErrSessionLocked && !core.IsResourceError(err) {
+		if err != core.ErrDecryptionFailed && !isEnclaveOperationError(err) {
 			core.Panic(err)
 		}
 		return nil, err
@@ -81,7 +93,7 @@ Open decrypts an Enclave object and places its contents into an immutable Locked
 func (e *Enclave) Open() (*LockedBuffer, error) {
 	b, err := core.Open(e.Enclave)
 	if err != nil {
-		if err != core.ErrDecryptionFailed && err != core.ErrSessionLocked && !core.IsResourceError(err) {
+		if err != core.ErrDecryptionFailed && !isEnclaveOperationError(err) {
 			core.Panic(err)
 		}
 		return nil, err

@@ -13,8 +13,8 @@ var (
 	// Ensure we only start a single signal handling instance
 	create sync.Once
 
-	// Channel for updating the signal handler
-	sigfunc = make(chan func(os.Signal), 1)
+	handlerMu sync.RWMutex
+	handler   func(os.Signal)
 
 	// Channel that caught signals are sent to by the runtime
 	listener = make(chan os.Signal, 32)
@@ -31,23 +31,22 @@ CatchSignal assigns a given function to be run in the event of a signal being re
 This function can be called multiple times with the effect that only the last call will have any effect.
 */
 func CatchSignal(f func(os.Signal), signals ...os.Signal) {
+	handlerMu.Lock()
+	handler = f
+	handlerMu.Unlock()
+
 	create.Do(func() {
-		// Start a goroutine to listen on the channels.
 		go func() {
-			var handler func(os.Signal)
-			for {
-				select {
-				case signal := <-listener:
-					handler(signal)
-					core.Exit(1)
-				case handler = <-sigfunc:
-				}
+			sig := <-listener
+			defer core.Exit(1)
+			handlerMu.RLock()
+			f := handler
+			handlerMu.RUnlock()
+			if f != nil {
+				f(sig)
 			}
 		}()
 	})
-
-	// Update the handler function.
-	sigfunc <- f
 
 	// Notify the channel if we receive a signal. Channels registered by
 	// anyone else keep working; nothing is reset.

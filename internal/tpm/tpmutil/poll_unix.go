@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"syscall"
+	"time"
 )
 
 // pollFD matches the pollfd layout on Linux and Darwin.
@@ -15,17 +17,29 @@ type pollFD struct {
 	revents int16
 }
 
-// poll blocks until the file descriptor is ready for reading or an error occurs.
-func poll(f *os.File) error {
+// poll waits for the file descriptor to become readable by deadline.
+func poll(f *os.File, deadline time.Time) error {
 	fd := pollFD{fd: int32(f.Fd()), events: 0x1} // POLLIN
-	errno := pollRead(&fd)
-	runtime.KeepAlive(f)
-	if errno != 0 {
-		return errno
-	}
+	defer runtime.KeepAlive(f)
 
-	if fd.revents != fd.events {
-		return fmt.Errorf("unexpected poll Revents 0x%x", fd.revents)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return ErrTimeout
+		}
+		n, errno := pollRead(&fd, remaining)
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 {
+			return errno
+		}
+		if n == 0 {
+			return ErrTimeout
+		}
+		if fd.revents != fd.events {
+			return fmt.Errorf("unexpected poll Revents 0x%x", fd.revents)
+		}
+		return nil
 	}
-	return nil
 }

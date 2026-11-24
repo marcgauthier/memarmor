@@ -11,7 +11,7 @@ import (
 )
 
 func write(t *testing.T, s *Stream, b []byte) {
-	n, err := s.Write(b)
+	n, err := s.WriteAndWipe(b)
 	if err != nil {
 		t.Error("write should always succeed", err)
 	}
@@ -20,6 +20,29 @@ func write(t *testing.T, s *Stream, b []byte) {
 	}
 	if !bytes.Equal(b, make([]byte, len(b))) {
 		t.Error("buffer not wiped")
+	}
+}
+
+func TestStreamWritePreservesInput(t *testing.T) {
+	s := NewStream()
+	defer s.Destroy()
+	want := bytes.Repeat([]byte{0x33}, StreamChunkSize+1)
+	src := bytes.Clone(want)
+	var other bytes.Buffer
+	n, err := io.MultiWriter(s, &other).Write(src)
+	if err != nil || n != len(src) || !bytes.Equal(src, want) || !bytes.Equal(other.Bytes(), want) {
+		t.Fatalf("Write failed to preserve the input: %d, %v", n, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Destroy()
+	if !got.EqualTo(want) {
+		t.Fatal("stream data mismatch")
 	}
 }
 

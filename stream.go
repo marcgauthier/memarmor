@@ -108,15 +108,21 @@ func (s *Stream) expectedAD(seq uint64) []byte {
 }
 
 /*
-Write encrypts and writes some given data to a Stream object.
-
-The data is broken down into chunks and added to the stream in order. The last thing to be written to the stream is the last thing that will be read back.
-
-The input is wiped chunk by chunk as it is sealed. Writing to a closed
-Stream reports ErrStreamClosed. A locked session or exhausted memory is
-reported with the number of bytes sealed so far.
+Write encrypts data into the stream in order and leaves data unchanged.
+It returns the number of bytes sealed and any error that stopped the write.
 */
 func (s *Stream) Write(data []byte) (int, error) {
+	return s.write(data, core.NewEnclaveADCopy)
+}
+
+// WriteAndWipe encrypts data into the stream and wipes each chunk after it is
+// sealed. data must be writable. On error it returns the number of bytes
+// sealed and wiped.
+func (s *Stream) WriteAndWipe(data []byte) (int, error) {
+	return s.write(data, core.NewEnclaveAD)
+}
+
+func (s *Stream) write(data []byte, seal func([]byte, []byte) (*core.Enclave, error)) (int, error) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -124,12 +130,9 @@ func (s *Stream) Write(data []byte) (int, error) {
 		return 0, ErrStreamClosed
 	}
 
-	for i := 0; i < len(data); i += c {
-		end := i + c
-		if end > len(data) {
-			end = len(data)
-		}
-		ce, err := core.NewEnclaveAD(data[i:end], s.chunkAD(s.writeSeq))
+	for i := 0; i < len(data); {
+		end := i + min(c, len(data)-i)
+		ce, err := seal(data[i:end], s.chunkAD(s.writeSeq))
 		if err != nil {
 			// The unwritten tail is untouched.
 			return i, err
@@ -137,6 +140,7 @@ func (s *Stream) Write(data []byte) (int, error) {
 		s.writeSeq++
 		s.queuedBytes += end - i
 		s.join(&Enclave{ce})
+		i = end
 	}
 	return len(data), nil
 }
@@ -168,26 +172,34 @@ func (s *Stream) Close() error {
 // fill pops the next chunk into pending. It reports io.EOF at a clean end
 // and io.ErrUnexpectedEOF when a closed stream ends early.
 func (s *Stream) fill() error {
-	e := s.pop()
-	if e == nil {
+	head := s.Front()
+	if head == nil {
 		if s.closed && s.consumed != s.expectedTotal {
 			return io.ErrUnexpectedEOF
 		}
 		return io.EOF
 	}
+	e := head.Value.(*Enclave)
 	b, err := e.OpenWithAD(s.expectedAD(s.consumed))
 	if err != nil {
 		return err
 	}
-	s.consumed++
 	// The final chunk of a closed stream is the end marker, not data.
-	if s.closed && s.consumed == s.expectedTotal {
+	if s.closed && s.consumed == s.expectedTotal-1 {
 		defer b.Destroy()
-		if !bytes.Equal(b.Bytes(), streamEndMarker) {
+		matched := false
+		if !b.Buffer.WithBytes(func(data []byte) { matched = bytes.Equal(data, streamEndMarker) }) {
+			return bufferViewError(b)
+		}
+		if !matched {
 			return core.ErrDecryptionFailed
 		}
+		s.pop().Destroy()
+		s.consumed++
 		return io.EOF
 	}
+	s.pop().Destroy()
+	s.consumed++
 	s.pending = b
 	s.pendingOff = 0
 	s.queuedBytes -= b.Size()
@@ -215,9 +227,15 @@ func (s *Stream) Read(buf []byte) (int, error) {
 	if len(buf) == 0 {
 		return 0, nil
 	}
-	n := copy(buf, s.pending.Bytes()[s.pendingOff:])
+	var n, size int
+	if !s.pending.Buffer.WithBytes(func(data []byte) {
+		size = len(data)
+		n = copy(buf, data[s.pendingOff:])
+	}) {
+		return 0, bufferViewError(s.pending)
+	}
 	s.pendingOff += n
-	if s.pendingOff == s.pending.Size() {
+	if s.pendingOff == size {
 		s.pending.Destroy()
 		s.pending = nil
 		s.pendingOff = 0
@@ -232,7 +250,7 @@ func (s *Stream) Size() int {
 
 	n := s.queuedBytes
 	if s.pending != nil {
-		n += s.pending.Size() - s.pendingOff
+		n += max(0, s.pending.Size()-s.pendingOff)
 	}
 	return n
 }
@@ -244,15 +262,19 @@ func (s *Stream) Next() (*LockedBuffer, error) {
 
 	if s.pending != nil {
 		// Hand over the remainder of the current chunk.
-		rb, err := core.NewBuffer(s.pending.Size() - s.pendingOff)
+		size := s.pending.Size()
+		if size == 0 {
+			return newNullBuffer(), core.ErrBufferExpired
+		}
+		rb, err := core.NewBuffer(size - s.pendingOff)
 		if err != nil {
-			s.pending.Destroy()
-			s.pending = nil
-			s.pendingOff = 0
 			return newNullBuffer(), err
 		}
 		rest := newBuffer(rb)
-		rest.Copy(s.pending.Bytes()[s.pendingOff:])
+		if !s.pending.Buffer.WithBytes(func(data []byte) { rest.Copy(data[s.pendingOff:]) }) {
+			rest.Destroy()
+			return newNullBuffer(), bufferViewError(s.pending)
+		}
 		rest.Freeze()
 		s.pending.Destroy()
 		s.pending = nil

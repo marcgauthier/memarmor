@@ -10,11 +10,11 @@ import (
 
 const madvDontDump = 16 // Linux MADV_DONTDUMP.
 
-// Lock is a wrapper for mlock(2), with extra precautions.
-func Lock(b []byte) error {
-	// Advise the kernel not to dump. Ignore failure.
-	syscall.Madvise(b, madvDontDump)
+// ExcludeFromCoreDumps marks this mapping to be omitted from kernel core dumps.
+func ExcludeFromCoreDumps(b []byte) error { return syscall.Madvise(b, madvDontDump) }
 
+// Lock is a wrapper for mlock(2).
+func Lock(b []byte) error {
 	// Call mlock.
 	if err := syscall.Mlock(b); err != nil {
 		return fmt.Errorf("<memcall> could not acquire lock on %p, limit reached? [Err: %s]", _getStartPtr(b), err)

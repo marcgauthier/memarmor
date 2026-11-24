@@ -8,11 +8,8 @@ import (
 	"syscall"
 )
 
-// Lock is a wrapper for mlock(), with extra precautions.
+// Lock is a wrapper for mlock().
 func Lock(b []byte) error {
-	// Advise the kernel not to dump. Ignore failure.
-	madvise(b, syscall.MADV_NOCORE)
-
 	// Call mlock.
 	if err := mlock(b); err != nil {
 		return fmt.Errorf("<memcall> could not acquire lock on %p, limit reached? [Err: %s]", &b[0], err)

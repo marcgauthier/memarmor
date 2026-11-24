@@ -32,6 +32,22 @@ func execute[R any](t transport.TPM, cmd Command[R, *R], rsp *R, extraSess ...Se
 	if len(sess) > 3 {
 		return fmt.Errorf("too many sessions: %v", len(sess))
 	}
+	var outputSession Session
+	var outputDst []byte
+	if hmac, ok := any(rsp).(*HmacResponse); ok && hmac.OutHMAC.Buffer != nil {
+		outputDst = hmac.OutHMAC.Buffer
+		for _, s := range sess {
+			if s.IsEncryption() {
+				if outputSession != nil {
+					return fmt.Errorf("multiple response encryption sessions")
+				}
+				outputSession = s
+			}
+		}
+		if outputSession == nil {
+			return fmt.Errorf("HMAC ExecuteInto requires response parameter encryption")
+		}
+	}
 	hasSessions := len(sess) > 0
 	// Initialize the sessions, if needed
 	for i, s := range sess {
@@ -107,12 +123,23 @@ func execute[R any](t transport.TPM, cmd Command[R, *R], rsp *R, extraSess ...Se
 			return err
 		}
 	}
+	if outputDst != nil {
+		return decryptResponseInto(rspParms, outputSession, outputDst)
+	}
 	err = rspParameters(rspParms, sess, rsp)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func decryptResponseInto(parms []byte, session Session, dst []byte) error {
+	if len(parms) < 2 || int(binary.BigEndian.Uint16(parms)) != len(dst) || len(parms)-2 != len(dst) {
+		return fmt.Errorf("invalid encrypted response length")
+	}
+	copy(dst, parms[2:])
+	return session.Decrypt(dst)
 }
 
 func isMarshalledByReflection(v reflect.Value) bool {

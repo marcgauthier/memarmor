@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"unsafe"
@@ -39,8 +40,9 @@ The number of Buffers that can exist at one time is limited by how much memory y
 type Buffer struct {
 	sync.RWMutex // Local mutex lock // TODO: this does not protect 'data' field
 
-	alive   bool // Signals that destruction has not come
-	mutable bool // Mutability state of underlying memory
+	alive      bool // Signals that destruction has not come
+	mutable    bool // Mutability state of underlying memory
+	protection MemoryProtectionStatus
 
 	data   []byte // Portion of memory holding the data
 	memory []byte // Entire allocated memory region
@@ -56,10 +58,26 @@ type Buffer struct {
 NewBuffer is a raw constructor for the Buffer object.
 */
 func NewBuffer(size int) (*Buffer, error) {
+	if !sessionMu.TryRLock() {
+		return nil, ErrSessionBusy
+	}
+	defer finishSession()
+	return newBuffer(size)
+}
+
+// newBuffer registers a guarded allocation under the caller's session lock.
+func newBuffer(size int) (*Buffer, error) {
+	return newBufferWithProtection(size, memoryProtectionRequirements)
+}
+
+func newBufferWithProtection(size int, required MemoryProtectionRequirements) (*Buffer, error) {
 	var err error
 
 	if size < 1 {
 		return nil, ErrNullBuffer
+	}
+	if size > math.MaxInt-3*pageSize+1 {
+		return nil, ErrAllocFailed
 	}
 
 	b := new(Buffer)
@@ -89,22 +107,30 @@ func NewBuffer(size int) (*Buffer, error) {
 		return nil, fmt.Errorf("%w: %s", ErrLockFailed, err)
 	}
 
-	// Ask the kernel to zero the mapping in any forked child (Linux).
-	wipeOnFork(b.inner)
+	b.protection = MemoryProtectionStatus{
+		CoreDumpExclusion: memcall.ExcludeFromCoreDumps(b.inner),
+		ForkWipe:          wipeOnFork(b.inner),
+	}
+	if err := required.check(b.protection); err != nil {
+		return nil, errors.Join(err, memcall.Free(b.memory))
+	}
 
 	// Initialise the canary value and reference regions.
 	if err := Scramble(b.canary); err != nil {
-		Panic(err)
+		_ = memcall.Free(b.memory)
+		return nil, fmt.Errorf("%w: %s", ErrAllocFailed, err)
 	}
 	Copy(b.preguard, b.canary)
 	Copy(b.postguard, b.canary)
 
 	// Make the guard pages inaccessible.
 	if err := memcall.Protect(b.preguard, memcall.NoAccess()); err != nil {
-		Panic(err)
+		_ = memcall.Free(b.memory)
+		return nil, fmt.Errorf("%w: %s", ErrAllocFailed, err)
 	}
 	if err := memcall.Protect(b.postguard, memcall.NoAccess()); err != nil {
-		Panic(err)
+		_ = memcall.Free(b.memory)
+		return nil, fmt.Errorf("%w: %s", ErrAllocFailed, err)
 	}
 
 	// Set remaining properties
@@ -118,9 +144,42 @@ func NewBuffer(size int) (*Buffer, error) {
 	return b, nil
 }
 
+// MemoryProtection reports the protection status of the live mapping.
+func (b *Buffer) MemoryProtection() MemoryProtectionStatus {
+	b.RLock()
+	defer b.RUnlock()
+	if !b.alive {
+		return MemoryProtectionStatus{CoreDumpExclusion: ErrBufferExpired, ForkWipe: ErrBufferExpired}
+	}
+	return b.protection
+}
+
 // Data returns a byte slice representing the memory region containing the data.
 func (b *Buffer) Data() []byte {
 	return b.data
+}
+
+// WithBytes keeps the mapping alive for the duration of fn. The callback must
+// release the slice before returning and may not start a session transition.
+func (b *Buffer) WithBytes(fn func([]byte)) bool {
+	if !sessionMu.TryRLock() {
+		return false
+	}
+	defer sessionMu.RUnlock()
+	b.RLock()
+	defer b.RUnlock()
+	if !b.alive {
+		return false
+	}
+	fn(b.data)
+	return true
+}
+
+// Size reports the current length without borrowing the mapping.
+func (b *Buffer) Size() int {
+	b.RLock()
+	defer b.RUnlock()
+	return len(b.data)
 }
 
 // Inner returns a byte slice representing the entire inner memory pages. This should NOT be used unless you have a specific need.
@@ -196,11 +255,25 @@ Destroy performs some security checks, securely wipes the contents of, and then 
 If the Buffer has already been destroyed, the function does nothing and returns nil.
 */
 func (b *Buffer) Destroy() {
-	if err := b.destroy(); err != nil {
+	if err := b.release(); err != nil {
 		Panic(err)
 	}
-	// Remove this one from global slice.
+}
+
+// discard is used by session operations. Their deferred cleanup releases the
+// session lock before purging on an internal panic.
+func (b *Buffer) discard() {
+	if err := b.release(); err != nil {
+		panic(err)
+	}
+}
+
+func (b *Buffer) release() error {
+	if err := b.destroy(); err != nil {
+		return err
+	}
 	buffers.remove(b)
+	return nil
 }
 
 func (b *Buffer) destroy() error {
@@ -211,7 +284,10 @@ func (b *Buffer) destroy() error {
 	// Attain a mutex lock on this Buffer.
 	b.Lock()
 	defer b.Unlock()
+	return b.destroyLocked()
+}
 
+func (b *Buffer) destroyLocked() error {
 	// Return if it's already destroyed.
 	if !b.alive {
 		return nil

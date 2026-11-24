@@ -18,3 +18,10 @@ Import paths were rewritten from `github.com/google/go-tpm/` to
 `github.com/marcgauthier/memarmor/internal/tpm/`. TPM device polling uses
 in-tree platform bindings. The upstream `stringer` directive was removed
 from this snapshot.
+
+MemArmor adds a guarded destination for an authenticated and encrypted TPM
+HMAC response. The reusable transport sessions wipe their key bytes when
+closed.
+
+Platform TPM connections use a bounded I/O worker and a transaction deadline.
+Device readiness and retry waits also honor the deadline.

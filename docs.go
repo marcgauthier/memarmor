@@ -31,8 +31,9 @@ Package memarmor implements a secure software enclave for the storage of sensiti
 		}
 		defer keyBuf.Destroy()
 
-		// Um output it
-		fmt.Println(keyBuf.Bytes())
+		keyBuf.WithBytes(func(key []byte) {
+			// Use the key within this callback.
+		})
 	}
 
 	func invert(key *memarmor.Enclave) *memarmor.Enclave {
@@ -85,7 +86,12 @@ Several functions exist to make the mass purging of data very easy. It is recomm
 	}
 	defer b.Destroy()
 
-Core dumps are disabled by default. If you absolutely require them, you can enable them by using unix.Setrlimit to set RLIMIT_CORE to an appropriate value.
+MemArmor attempts to set a zero process core-dump limit on supported Unix
+platforms. CoreDumpLimitError reports the result. Linux crash collectors
+may ignore this limit for piped core dumps. LockedBuffer.MemoryProtection
+reports per-mapping dump exclusion and fork wiping, and
+RequireMemoryProtection makes either protection mandatory for guarded
+allocations. The Windows backend does not set a process dump limit.
 
 The sealing cipher can be switched between XSalsa20-Poly1305 and
 AES-256-GCM-SIV with SetCipher, either globally or per enclave. When a TPM
@@ -93,6 +99,9 @@ AES-256-GCM-SIV with SetCipher, either globally or per enclave. When a TPM
 LockSessionKey and UnlockSessionKey to evict the key from RAM between uses,
 and SetTPMSealPolicy to bind seals to a measured boot state. Streams should
 be closed with Close once writing finishes so readers can detect truncation,
-and destroyed with Destroy when abandoned early.
+and destroyed with Destroy when abandoned early. Stream.Write preserves
+its input. Stream.WriteAndWipe explicitly consumes writable input.
+LockedBuffer.String returns redacted text. Use WithBytes for scoped access
+to the underlying data.
 */
 package memarmor

@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/marcgauthier/memarmor/internal/memwipe"
 	"github.com/marcgauthier/memarmor/internal/tpm/tpm2/transport"
 )
 
@@ -361,6 +362,7 @@ func HMACSession(t transport.TPM, hash TPMIAlgHash, nonceSize int, opts ...AuthO
 	}
 
 	closer := func() error {
+		defer memwipe.Bytes(sess.sessionKey)
 		_, err := (&FlushContext{FlushHandle: sess.handle}).Execute(t)
 		return err
 	}
@@ -417,6 +419,7 @@ func (s *hmacSession) Init(t transport.TPM) error {
 		if err != nil {
 			return err
 		}
+		defer memwipe.Bytes(salt)
 		sasCmd.EncryptedSalt = *encSalt
 	}
 	sasRsp, err := sasCmd.Execute(t)
@@ -434,6 +437,7 @@ func (s *hmacSession) Init(t transport.TPM) error {
 		var authSalt []byte
 		authSalt = append(authSalt, s.bindAuth...)
 		authSalt = append(authSalt, salt...)
+		defer memwipe.Bytes(authSalt)
 		s.sessionKey = KDFa(ha, authSalt, "ATH", s.nonceTPM.Buffer, s.nonceCaller.Buffer, ha.Size()*8)
 	}
 	return nil
@@ -539,6 +543,7 @@ func (s *hmacSession) Authorize(cc TPMCC, parms, addNonces []byte, names []TPM2B
 	hmacKey = append(hmacKey, s.sessionKey...)
 	if len(s.bindName.Buffer) == 0 || authIndex >= len(names) || !bytes.Equal(names[authIndex].Buffer, s.bindName.Buffer) {
 		hmacKey = append(hmacKey, hmacKeyFromAuthValue(s.auth)...)
+		defer memwipe.Bytes(hmacKey)
 	}
 
 	// Compute the authorization HMAC.
@@ -578,6 +583,7 @@ func (s *hmacSession) Validate(rc TPMRC, cc TPMCC, parms []byte, names []TPM2BNa
 	hmacKey = append(hmacKey, s.sessionKey...)
 	if len(s.bindName.Buffer) == 0 || authIndex >= len(names) || !bytes.Equal(names[authIndex].Buffer, s.bindName.Buffer) {
 		hmacKey = append(hmacKey, hmacKeyFromAuthValue(s.auth)...)
+		defer memwipe.Bytes(hmacKey)
 	}
 
 	// Compute the authorization HMAC.
@@ -622,11 +628,13 @@ func (s *hmacSession) Encrypt(parameter []byte) error {
 	var sessionValue []byte
 	sessionValue = append(sessionValue, s.sessionKey...)
 	sessionValue = append(sessionValue, s.auth...)
+	defer memwipe.Bytes(sessionValue)
 	ha, err := s.hash.Hash()
 	if err != nil {
 		return err
 	}
 	keyIV := KDFa(ha, sessionValue, "CFB", s.nonceCaller.Buffer, s.nonceTPM.Buffer, keyIVBytes*8)
+	defer memwipe.Bytes(keyIV)
 	key, err := aes.NewCipher(keyIV[:keyBytes])
 	if err != nil {
 		return err
@@ -653,11 +661,13 @@ func (s *hmacSession) Decrypt(parameter []byte) error {
 	var sessionValue []byte
 	sessionValue = append(sessionValue, s.sessionKey...)
 	sessionValue = append(sessionValue, s.auth...)
+	defer memwipe.Bytes(sessionValue)
 	ha, err := s.hash.Hash()
 	if err != nil {
 		return err
 	}
 	keyIV := KDFa(ha, sessionValue, "CFB", s.nonceTPM.Buffer, s.nonceCaller.Buffer, keyIVBytes*8)
+	defer memwipe.Bytes(keyIV)
 	key, err := aes.NewCipher(keyIV[:keyBytes])
 	if err != nil {
 		return err
@@ -738,6 +748,7 @@ func PolicySession(t transport.TPM, hash TPMIAlgHash, nonceSize int, opts ...Aut
 	}
 
 	closer := func() error {
+		defer memwipe.Bytes(sess.sessionKey)
 		_, err := (&FlushContext{sess.handle}).Execute(t)
 		return err
 	}
@@ -783,6 +794,7 @@ func (s *policySession) Init(t transport.TPM) error {
 		if err != nil {
 			return err
 		}
+		defer memwipe.Bytes(salt)
 		sasCmd.EncryptedSalt = *encSalt
 	}
 	sasRsp, err := sasCmd.Execute(t)
@@ -796,6 +808,7 @@ func (s *policySession) Init(t transport.TPM) error {
 		var authSalt []byte
 		authSalt = append(authSalt, s.bindAuth...)
 		authSalt = append(authSalt, salt...)
+		defer memwipe.Bytes(authSalt)
 		ha, err := s.hash.Hash()
 		if err != nil {
 			return err
@@ -853,6 +866,7 @@ func (s *policySession) Authorize(cc TPMCC, parms, addNonces []byte, names []TPM
 		var hmacKey []byte
 		hmacKey = append(hmacKey, s.sessionKey...)
 		hmacKey = append(hmacKey, hmacKeyFromAuthValue(s.auth)...)
+		defer memwipe.Bytes(hmacKey)
 
 		// Compute the authorization HMAC.
 		cph, err := cpHash(s.hash, cc, names, parms)
@@ -900,6 +914,7 @@ func (s *policySession) Validate(rc TPMRC, cc TPMCC, parms []byte, _ []TPM2BName
 		var hmacKey []byte
 		hmacKey = append(hmacKey, s.sessionKey...)
 		hmacKey = append(hmacKey, hmacKeyFromAuthValue(s.auth)...)
+		defer memwipe.Bytes(hmacKey)
 		// Compute the authorization HMAC.
 		rph, err := rpHash(s.hash, rc, cc, parms)
 		if err != nil {
@@ -943,11 +958,13 @@ func (s *policySession) Encrypt(parameter []byte) error {
 	var sessionValue []byte
 	sessionValue = append(sessionValue, s.sessionKey...)
 	sessionValue = append(sessionValue, s.auth...)
+	defer memwipe.Bytes(sessionValue)
 	ha, err := s.hash.Hash()
 	if err != nil {
 		return err
 	}
 	keyIV := KDFa(ha, sessionValue, "CFB", s.nonceCaller.Buffer, s.nonceTPM.Buffer, keyIVBytes*8)
+	defer memwipe.Bytes(keyIV)
 	key, err := aes.NewCipher(keyIV[:keyBytes])
 	if err != nil {
 		return err
@@ -974,11 +991,13 @@ func (s *policySession) Decrypt(parameter []byte) error {
 	var sessionValue []byte
 	sessionValue = append(sessionValue, s.sessionKey...)
 	sessionValue = append(sessionValue, s.auth...)
+	defer memwipe.Bytes(sessionValue)
 	ha, err := s.hash.Hash()
 	if err != nil {
 		return err
 	}
 	keyIV := KDFa(ha, sessionValue, "CFB", s.nonceTPM.Buffer, s.nonceCaller.Buffer, keyIVBytes*8)
+	defer memwipe.Bytes(keyIV)
 	key, err := aes.NewCipher(keyIV[:keyBytes])
 	if err != nil {
 		return err

@@ -9,8 +9,8 @@ import (
 // itself on machines without accessible TPM 2.0 hardware.
 func TestTPMHardwareSealRoundTrip(t *testing.T) {
 	be := realTPM{}
-	if !be.available() {
-		t.Skip("no TPM 2.0 accessible")
+	if err := be.probe(); err != nil {
+		t.Skipf("no TPM 2.0 accessible: %v", err)
 	}
 
 	for _, pcrs := range [][]int{nil, {16}} {
@@ -22,8 +22,8 @@ func TestTPMHardwareSealRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pcrs %v: seal failed: %s", pcrs, err)
 		}
-		back, err := be.unseal(blob)
-		if err != nil {
+		back := make([]byte, len(secret))
+		if err := be.unseal(blob, back); err != nil {
 			t.Fatalf("pcrs %v: unseal failed: %s", pcrs, err)
 		}
 		if !bytes.Equal(secret, back) {
@@ -35,7 +35,7 @@ func TestTPMHardwareSealRoundTrip(t *testing.T) {
 		// A corrupted blob must fail, not panic.
 		bad := append([]byte{}, blob...)
 		bad[len(bad)-1] ^= 0xff
-		if _, err := be.unseal(bad); err == nil {
+		if err := be.unseal(bad, back); err == nil {
 			t.Errorf("pcrs %v: expected failure on corrupt blob", pcrs)
 		}
 	}

@@ -26,25 +26,33 @@ type Coffer struct {
 
 // NewCoffer is a raw constructor for the *Coffer object.
 func NewCoffer() (*Coffer, error) {
+	if !sessionMu.TryRLock() {
+		return nil, ErrSessionBusy
+	}
+	defer finishSession()
+	return newCoffer()
+}
+
+func newCoffer() (*Coffer, error) {
 	s := new(Coffer)
 	var err error
-	if s.left, err = NewBuffer(32); err != nil {
+	if s.left, err = newBuffer(32); err != nil {
 		return nil, err
 	}
-	if s.right, err = NewBuffer(32); err != nil {
-		s.left.Destroy()
+	if s.right, err = newBuffer(32); err != nil {
+		s.left.discard()
 		return nil, err
 	}
-	if s.rand, err = NewBuffer(32); err != nil {
-		s.left.Destroy()
-		s.right.Destroy()
+	if s.rand, err = newBuffer(32); err != nil {
+		s.left.discard()
+		s.right.discard()
 		return nil, err
 	}
 
-	if err := s.Init(); err != nil {
-		s.left.Destroy()
-		s.right.Destroy()
-		s.rand.Destroy()
+	if err := s.init(); err != nil {
+		s.left.discard()
+		s.right.discard()
+		s.rand.discard()
 		return nil, err
 	}
 
@@ -53,7 +61,7 @@ func NewCoffer() (*Coffer, error) {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if err := s.Rekey(); err != nil {
+			if err := s.Rekey(); err != nil && err != ErrSessionBusy {
 				return
 			}
 		}
@@ -65,6 +73,14 @@ func NewCoffer() (*Coffer, error) {
 // InitValue installs a known 32 byte value inside a Coffer, splitting it
 // across fresh random partitions and overwriting the old.
 func (s *Coffer) InitValue(v []byte) error {
+	if !sessionMu.TryRLock() {
+		return ErrSessionBusy
+	}
+	defer finishSession()
+	return s.initValue(v)
+}
+
+func (s *Coffer) initValue(v []byte) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.destroyed() {
@@ -93,6 +109,14 @@ func (s *Coffer) InitValue(v []byte) error {
 
 // Init is used to reset the value stored inside a Coffer to a new random 32 byte value, overwriting the old.
 func (s *Coffer) Init() error {
+	if !sessionMu.TryRLock() {
+		return ErrSessionBusy
+	}
+	defer finishSession()
+	return s.init()
+}
+
+func (s *Coffer) init() error {
 	s.Lock()
 	defer s.Unlock()
 	if s.destroyed() {
@@ -120,10 +144,15 @@ func (s *Coffer) Init() error {
 View returns a snapshot of the contents of a Coffer inside a Buffer. As usual the Buffer should be destroyed as soon as possible after use by calling the Destroy method.
 */
 func (s *Coffer) View() (*Buffer, error) {
-	// Allocate before locking: NewBuffer may panic on resource exhaustion,
-	// and that must never happen while holding the coffer lock, since the
-	// panic path purges and re-locks this same coffer (deadlock).
-	b, err := NewBuffer(32)
+	if !sessionMu.TryRLock() {
+		return nil, ErrSessionBusy
+	}
+	defer finishSession()
+	return s.view()
+}
+
+func (s *Coffer) view() (*Buffer, error) {
+	b, err := newBuffer(32)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +160,7 @@ func (s *Coffer) View() (*Buffer, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.destroyed() {
-		b.Destroy()
+		b.discard()
 		return nil, ErrCofferExpired
 	}
 
@@ -150,6 +179,10 @@ func (s *Coffer) View() (*Buffer, error) {
 Rekey is used to re-key a Coffer. Ideally this should be done at short, regular intervals.
 */
 func (s *Coffer) Rekey() error {
+	if !sessionMu.TryRLock() {
+		return ErrSessionBusy
+	}
+	defer finishSession()
 	s.Lock()
 	defer s.Unlock()
 	if s.destroyed() {
@@ -159,6 +192,7 @@ func (s *Coffer) Rekey() error {
 	if err := Scramble(s.rand.Data()); err != nil {
 		return err
 	}
+	defer Wipe(s.rand.Data())
 
 	// Hash the current right partition for later.
 	hashRightCurrent := hash32(s.right.Data())

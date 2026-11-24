@@ -8,6 +8,8 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/marcgauthier/memarmor/internal/memwipe"
+
 	gcmsiv "github.com/marcgauthier/memarmor/internal/thirdparty/gcmsiv"
 	"github.com/marcgauthier/memarmor/internal/thirdparty/xcrypto/blake2b"
 	"github.com/marcgauthier/memarmor/internal/thirdparty/xcrypto/nacl/secretbox"
@@ -78,6 +80,14 @@ func DefaultCipher() Cipher {
 // ErrInvalidKeyLength is returned when attempting to encrypt or decrypt with a key that is not exactly 32 bytes in size.
 var ErrInvalidKeyLength = errors.New("<memarmor::core::ErrInvalidKeyLength> key must be exactly 32 bytes")
 
+// ErrCipherUnavailable indicates that the selected cipher cannot run on this host.
+var ErrCipherUnavailable = errors.New("<memarmor::core> selected cipher unavailable")
+
+// CipherAvailable reports whether this process supports the selected cipher.
+func CipherAvailable(c Cipher) bool {
+	return c == CipherXSalsa20Poly1305 || (c == CipherAES256GCMSIV && gcmsiv.Available())
+}
+
 // ErrBufferTooSmall is returned when the decryption function, Open, is given an output buffer that is too small to hold the plaintext. In practice the plaintext will be Overhead bytes smaller than the ciphertext returned by the encryption function, Seal.
 var ErrBufferTooSmall = errors.New("<memarmor::core::ErrBufferTooSmall> the given buffer is too small to hold the plaintext")
 
@@ -91,6 +101,14 @@ func Encrypt(plaintext, key []byte) ([]byte, error) {
 
 // EncryptWithCipher takes a plaintext message and a 32 byte key and returns an authenticated ciphertext sealed with the given cipher. It panics on an unknown cipher.
 func EncryptWithCipher(plaintext, key []byte, c Cipher) ([]byte, error) {
+	if !sessionMu.TryRLock() {
+		return nil, ErrSessionBusy
+	}
+	defer finishSession()
+	return encryptWithCipher(plaintext, key, c)
+}
+
+func encryptWithCipher(plaintext, key []byte, c Cipher) ([]byte, error) {
 	// Check the length of the key is correct.
 	if len(key) != 32 {
 		return nil, ErrInvalidKeyLength
@@ -104,7 +122,7 @@ func EncryptWithCipher(plaintext, key []byte, c Cipher) ([]byte, error) {
 		// Allocate space for and generate a nonce value.
 		var nonce [24]byte
 		if err := Scramble(nonce[:]); err != nil {
-			Panic(err)
+			return nil, err
 		}
 
 		// Encrypt m and return the result.
@@ -113,15 +131,23 @@ func EncryptWithCipher(plaintext, key []byte, c Cipher) ([]byte, error) {
 		Copy(out[1:], nonce[:])
 		return secretbox.Seal(out, plaintext, &nonce, k), nil
 	case CipherAES256GCMSIV:
-		aead, err := gcmsiv.New(key)
+		if !gcmsiv.Available() {
+			return nil, ErrCipherUnavailable
+		}
+		work, err := newBuffer(int(unsafe.Sizeof(gcmsiv.Workspace{})))
 		if err != nil {
-			return nil, ErrInvalidKeyLength // key is not 32 bytes long
+			return nil, err
+		}
+		defer work.discard()
+		aead, err := gcmsiv.New(key, (*gcmsiv.Workspace)(unsafe.Pointer(&work.Data()[0])))
+		if err != nil {
+			return nil, err
 		}
 
 		// GCM-SIV tolerates random nonces: a repeat only leaks equality.
 		var nonce [gcmsiv.NonceSize]byte
 		if err := Scramble(nonce[:]); err != nil {
-			Panic(err)
+			return nil, err
 		}
 
 		out := make([]byte, 1+gcmsiv.NonceSize, 1+gcmsiv.NonceSize+len(plaintext)+gcmsiv.TagSize)
@@ -142,6 +168,14 @@ decrypted data is returned. Callers must not rely on the contents of the
 output buffer when an error is returned.
 */
 func Decrypt(ciphertext, key []byte, output []byte) (int, error) {
+	if !sessionMu.TryRLock() {
+		return 0, ErrSessionBusy
+	}
+	defer finishSession()
+	return decrypt(ciphertext, key, output)
+}
+
+func decrypt(ciphertext, key []byte, output []byte) (int, error) {
 	// Check the length of the key is correct.
 	if len(key) != 32 {
 		return 0, ErrInvalidKeyLength
@@ -179,9 +213,17 @@ func Decrypt(ciphertext, key []byte, output []byte) (int, error) {
 			return len(m), nil // Return length of decrypted plaintext.
 		}
 	case CipherAES256GCMSIV:
-		aead, err := gcmsiv.New(key)
+		if !gcmsiv.Available() {
+			return 0, ErrCipherUnavailable
+		}
+		work, err := newBuffer(int(unsafe.Sizeof(gcmsiv.Workspace{})))
 		if err != nil {
-			return 0, ErrInvalidKeyLength // key is not 32 bytes long
+			return 0, err
+		}
+		defer work.discard()
+		aead, err := gcmsiv.New(key, (*gcmsiv.Workspace)(unsafe.Pointer(&work.Data()[0])))
+		if err != nil {
+			return 0, err
 		}
 
 		// Decrypt directly into the caller's buffer. The output is wiped
@@ -221,19 +263,8 @@ func Scramble(buf []byte) error {
 	return nil
 }
 
-//go:linkname memclrNoHeapPointers runtime.memclrNoHeapPointers
-//go:noescape
-func memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr)
-
-// Wipe takes a buffer and wipes it with zeroes. The wipe is performed by the
-// runtime's memory-clear routine, which the compiler cannot treat as a dead
-// store the way it can a plain loop.
-func Wipe(buf []byte) {
-	if len(buf) == 0 {
-		return
-	}
-	memclrNoHeapPointers(unsafe.Pointer(&buf[0]), uintptr(len(buf)))
-}
+// Wipe clears buf with a runtime call that the compiler cannot treat as a dead store.
+func Wipe(buf []byte) { memwipe.Bytes(buf) }
 
 // Copy is identical to Go's builtin copy function. Copying needs no timing
 // protection (only comparison does), so this is a plain copy.

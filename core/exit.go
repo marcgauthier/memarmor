@@ -1,11 +1,34 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/marcgauthier/memarmor/internal/memcall"
 )
+
+var sessionMu sync.RWMutex
+
+// ErrSessionBusy indicates that the session is changing and the operation can be retried.
+var ErrSessionBusy = errors.New("<memarmor::core> session transition in progress")
+
+// finishSession releases an operation before handling an internal panic, since
+// purging needs exclusive access to the session.
+func finishSession() {
+	sessionMu.RUnlock()
+	if v := recover(); v != nil {
+		Panic(v)
+	}
+}
+
+func finishSessionTransition() {
+	sessionMu.Unlock()
+	if v := recover(); v != nil {
+		Panic(v)
+	}
+}
 
 /*
 Purge wipes all sensitive data and keys before reinitialising the session with a fresh encryption key and secure values. Subsequent library operations will use these fresh values and the old data is assumed to be practically unrecoverable.
@@ -15,11 +38,18 @@ The creation of new Enclave objects should wait for this function to return sinc
 This function should be called before the program terminates, or else the provided Exit or Panic functions should be used to terminate.
 */
 func Purge() {
+	sessionMu.Lock()
+	defer sessionMu.Unlock()
+	if err := purgeSession(); err != nil {
+		panic(err)
+	}
+}
+
+// purgeSession runs with exclusive session access.
+func purgeSession() error {
 	var opErr error
 
-	// Halt the re-key cycle and prevent new enclaves or keys being created.
 	keyMtx.Lock()
-	defer keyMtx.Unlock()
 
 	// A purge retires the session key entirely: drop any TPM-sealed
 	// copy so it can never unlock the old key again.
@@ -35,6 +65,7 @@ func Purge() {
 			opErr = err
 		}
 	}
+	keyMtx.Unlock()
 
 	// Get a snapshot of existing Buffers.
 	snapshot := buffers.flush()
@@ -64,28 +95,17 @@ func Purge() {
 		}
 	}
 
-	// If we encountered an error, panic.
-	if opErr != nil {
-		panic(opErr)
-	}
+	return opErr
 }
 
 /*
 Exit terminates the process with a specified exit code but securely wipes and cleans up sensitive data before doing so.
 */
 func Exit(c int) {
-	// Wipe the encryption key used to encrypt data inside Enclaves.
-	getKey().Destroy()
-
-	// Get a snapshot of existing Buffers.
-	snapshot := buffers.copy() // copy ensures the buffers stay in the list until they are destroyed.
-
-	// Destroy them, performing the usual sanity checks.
-	for _, b := range snapshot {
-		b.Destroy()
+	sessionMu.Lock()
+	if err := purgeSession(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 	}
-
-	// Exit with the specified exit code.
 	os.Exit(c)
 }
 

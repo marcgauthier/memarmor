@@ -7,17 +7,51 @@ import (
 	"testing"
 )
 
+func TestTPMFailedVerificationKeepsLiveKey(t *testing.T) {
+	f := &fakeTPM{avail: true}
+	useFakeTPM(t, f)
+	e, err := NewEnclave([]byte("live session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.unsealErr = ErrTPMTimeout
+	if err := LockSessionKey(); !errors.Is(err, ErrTPMPolicy) || !errors.Is(err, ErrTPMTimeout) {
+		t.Fatalf("lock should report the verification timeout: %v", err)
+	}
+	if err := SetTPMSealPolicy([]int{7}); !errors.Is(err, ErrTPMPolicy) {
+		t.Fatalf("policy update should fail verification: %v", err)
+	}
+	f.unsealErr = nil
+	if err := LockSessionKey(); !errors.Is(err, ErrNoSealedKey) {
+		t.Fatalf("lock accepted the old seal: %v", err)
+	}
+	b, err := Open(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Destroy()
+	if !bytes.Equal(b.Data(), []byte("live session")) {
+		t.Fatal("live key was not preserved")
+	}
+}
+
 // fakeTPM is a test backend that frames sealed data without hardware.
 type fakeTPM struct {
 	avail        bool
 	failSeal     bool
 	failUnseal   bool
+	unsealErr    error
 	sealed       [][]byte
 	sealedPCRs   [][]int
 	sealedPolicy [][]byte
 }
 
-func (f *fakeTPM) available() bool { return f.avail }
+func (f *fakeTPM) probe() error {
+	if !f.avail {
+		return errors.New("fakeTPM: unavailable")
+	}
+	return nil
+}
 
 func (f *fakeTPM) seal(data []byte, pcrs []int) ([]byte, error) {
 	if !f.avail || f.failSeal {
@@ -32,18 +66,22 @@ func (f *fakeTPM) seal(data []byte, pcrs []int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (f *fakeTPM) unseal(blob []byte) ([]byte, error) {
+func (f *fakeTPM) unseal(blob, dst []byte) error {
+	if f.unsealErr != nil {
+		return f.unsealErr
+	}
 	if !f.avail || f.failUnseal {
-		return nil, errors.New("fakeTPM: unseal unavailable")
+		return errors.New("fakeTPM: unseal unavailable")
 	}
 	if len(blob) < 6 || string(blob[:4]) != "FAKE" {
-		return nil, ErrDecryptionFailed
+		return ErrDecryptionFailed
 	}
 	n := int(binary.BigEndian.Uint16(blob[4:6]))
-	if len(blob) != 6+n {
-		return nil, ErrDecryptionFailed
+	if len(blob) != 6+n || len(dst) != n {
+		return ErrDecryptionFailed
 	}
-	return append([]byte{}, blob[6:]...), nil
+	copy(dst, blob[6:])
+	return nil
 }
 
 // useFakeTPM installs a fake backend with a fresh session for one test.
