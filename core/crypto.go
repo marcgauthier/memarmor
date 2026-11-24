@@ -8,7 +8,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/ericlagergren/siv"
+	gcmsiv "github.com/marcgauthier/aes-gcm-siv"
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/nacl/secretbox"
 )
@@ -32,7 +32,7 @@ const (
 
 const (
 	xsalsaOverhead = 1 + 24 + secretbox.Overhead // version + nonce + auth
-	sivOverhead    = 1 + siv.NonceSize + siv.TagSize
+	sivOverhead    = 1 + gcmsiv.NonceSize + gcmsiv.TagSize
 )
 
 // Overhead is the size by which the ciphertext exceeds the plaintext when
@@ -113,18 +113,18 @@ func EncryptWithCipher(plaintext, key []byte, c Cipher) ([]byte, error) {
 		Copy(out[1:], nonce[:])
 		return secretbox.Seal(out, plaintext, &nonce, k), nil
 	case CipherAES256GCMSIV:
-		aead, err := siv.NewGCM(key)
+		aead, err := gcmsiv.New(key)
 		if err != nil {
 			return nil, ErrInvalidKeyLength // key is not 32 bytes long
 		}
 
 		// GCM-SIV tolerates random nonces: a repeat only leaks equality.
-		var nonce [siv.NonceSize]byte
+		var nonce [gcmsiv.NonceSize]byte
 		if err := Scramble(nonce[:]); err != nil {
 			Panic(err)
 		}
 
-		out := make([]byte, 1+siv.NonceSize, 1+siv.NonceSize+len(plaintext)+siv.TagSize)
+		out := make([]byte, 1+gcmsiv.NonceSize, 1+gcmsiv.NonceSize+len(plaintext)+gcmsiv.TagSize)
 		out[0] = byte(CipherAES256GCMSIV)
 		Copy(out[1:], nonce[:])
 		return aead.Seal(out, nonce[:], plaintext, nil), nil
@@ -179,15 +179,15 @@ func Decrypt(ciphertext, key []byte, output []byte) (int, error) {
 			return len(m), nil // Return length of decrypted plaintext.
 		}
 	case CipherAES256GCMSIV:
-		aead, err := siv.NewGCM(key)
+		aead, err := gcmsiv.New(key)
 		if err != nil {
 			return 0, ErrInvalidKeyLength // key is not 32 bytes long
 		}
 
 		// Decrypt directly into the caller's buffer. The output is wiped
 		// if authentication fails.
-		nonce := ciphertext[1 : 1+siv.NonceSize]
-		m, err := aead.Open(output[:0:cap(output)], nonce, ciphertext[1+siv.NonceSize:], nil)
+		nonce := ciphertext[1 : 1+gcmsiv.NonceSize]
+		m, err := aead.Open(output[:0:cap(output)], nonce, ciphertext[1+gcmsiv.NonceSize:], nil)
 		if err == nil {
 			return len(m), nil // Return length of decrypted plaintext.
 		}
