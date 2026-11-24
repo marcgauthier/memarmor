@@ -2,11 +2,12 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"unsafe"
 
-	"github.com/awnumar/memcall"
+	"github.com/marcgauthier/memarmor/internal/memcall"
 )
 
 var (
@@ -14,10 +15,21 @@ var (
 )
 
 // ErrNullBuffer is returned when attempting to construct a buffer of size less than one.
-var ErrNullBuffer = errors.New("<memguard::core::ErrNullBuffer> buffer size must be greater than zero")
+var ErrNullBuffer = errors.New("<memarmor::core::ErrNullBuffer> buffer size must be greater than zero")
 
 // ErrBufferExpired is returned when attempting to perform an operation on or with a buffer that has been destroyed.
-var ErrBufferExpired = errors.New("<memguard::core::ErrBufferExpired> buffer has been purged from memory and can no longer be used")
+var ErrBufferExpired = errors.New("<memarmor::core::ErrBufferExpired> buffer has been purged from memory and can no longer be used")
+
+// ErrAllocFailed is returned when guarded memory cannot be allocated.
+var ErrAllocFailed = errors.New("<memarmor::core::ErrAllocFailed> failed to allocate guarded memory")
+
+// ErrLockFailed is returned when guarded memory cannot be locked against swapping.
+var ErrLockFailed = errors.New("<memarmor::core::ErrLockFailed> failed to lock guarded memory; limit reached?")
+
+// IsResourceError reports whether an error signals memory resource exhaustion.
+func IsResourceError(err error) bool {
+	return errors.Is(err, ErrAllocFailed) || errors.Is(err, ErrLockFailed)
+}
 
 /*
 Buffer is a structure that holds raw sensitive data.
@@ -56,7 +68,7 @@ func NewBuffer(size int) (*Buffer, error) {
 	innerLen := roundToPageSize(size)
 	b.memory, err = memcall.Alloc((2 * pageSize) + innerLen)
 	if err != nil {
-		Panic(err)
+		return nil, fmt.Errorf("%w: %s", ErrAllocFailed, err)
 	}
 
 	// Construct slice reference for data buffer.
@@ -72,8 +84,13 @@ func NewBuffer(size int) (*Buffer, error) {
 
 	// Lock the pages that will hold sensitive data.
 	if err := memcall.Lock(b.inner); err != nil {
-		Panic(err)
+		// Release the mapping before reporting; nothing is registered yet.
+		_ = memcall.Free(b.memory)
+		return nil, fmt.Errorf("%w: %s", ErrLockFailed, err)
 	}
+
+	// Ask the kernel to zero the mapping in any forked child (Linux).
+	wipeOnFork(b.inner)
 
 	// Initialise the canary value and reference regions.
 	if err := Scramble(b.canary); err != nil {
@@ -211,7 +228,7 @@ func (b *Buffer) destroy() error {
 
 	// Verify the canary
 	if !Equal(b.preguard, b.postguard) || !Equal(b.preguard[:len(b.canary)], b.canary) {
-		return errors.New("<memguard::core::buffer> canary verification failed; buffer overflow detected")
+		return errors.New("<memarmor::core::buffer> canary verification failed; buffer overflow detected")
 	}
 
 	// Wipe the memory.

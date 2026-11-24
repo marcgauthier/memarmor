@@ -1,10 +1,10 @@
-package memguard
+package memarmor
 
 import (
 	"bytes"
 	"testing"
 
-	"github.com/awnumar/memguard/core"
+	"github.com/marcgauthier/memarmor/core"
 )
 
 func TestNewEnclave(t *testing.T) {

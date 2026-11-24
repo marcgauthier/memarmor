@@ -10,7 +10,7 @@ import (
 const interval = 500 * time.Millisecond
 
 // ErrCofferExpired is returned when a function attempts to perform an operation using a secure key container that has been wiped and destroyed.
-var ErrCofferExpired = errors.New("<memguard::core::ErrCofferExpired> attempted usage of destroyed key object")
+var ErrCofferExpired = errors.New("<memarmor::core::ErrCofferExpired> attempted usage of destroyed key object")
 
 /*
 Coffer is a specialized container for securing highly-sensitive, 32 byte values.
@@ -25,25 +25,70 @@ type Coffer struct {
 }
 
 // NewCoffer is a raw constructor for the *Coffer object.
-func NewCoffer() *Coffer {
+func NewCoffer() (*Coffer, error) {
 	s := new(Coffer)
-	s.left, _ = NewBuffer(32)
-	s.right, _ = NewBuffer(32)
-	s.rand, _ = NewBuffer(32)
+	var err error
+	if s.left, err = NewBuffer(32); err != nil {
+		return nil, err
+	}
+	if s.right, err = NewBuffer(32); err != nil {
+		s.left.Destroy()
+		return nil, err
+	}
+	if s.rand, err = NewBuffer(32); err != nil {
+		s.left.Destroy()
+		s.right.Destroy()
+		return nil, err
+	}
 
-	s.Init()
+	if err := s.Init(); err != nil {
+		s.left.Destroy()
+		s.right.Destroy()
+		s.rand.Destroy()
+		return nil, err
+	}
 
 	go func(s *Coffer) {
 		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
 
 		for range ticker.C {
 			if err := s.Rekey(); err != nil {
-				break
+				return
 			}
 		}
 	}(s)
 
-	return s
+	return s, nil
+}
+
+// InitValue installs a known 32 byte value inside a Coffer, splitting it
+// across fresh random partitions and overwriting the old.
+func (s *Coffer) InitValue(v []byte) error {
+	s.Lock()
+	defer s.Unlock()
+	if s.destroyed() {
+		return ErrCofferExpired
+	}
+	if len(v) != 32 {
+		return ErrInvalidKeyLength
+	}
+
+	if err := Scramble(s.left.Data()); err != nil {
+		return err
+	}
+	if err := Scramble(s.right.Data()); err != nil {
+		return err
+	}
+
+	// left = value XOR hash(right)
+	h := hash32(s.right.Data())
+	for i := range s.left.Data() {
+		s.left.Data()[i] = v[i] ^ h[i]
+	}
+	Wipe(h[:])
+
+	return nil
 }
 
 // Init is used to reset the value stored inside a Coffer to a new random 32 byte value, overwriting the old.
@@ -62,11 +107,11 @@ func (s *Coffer) Init() error {
 	}
 
 	// left = left XOR hash(right)
-	hr := Hash(s.right.Data())
-	for i := range hr {
+	hr := hash32(s.right.Data())
+	for i := range s.left.Data() {
 		s.left.Data()[i] ^= hr[i]
 	}
-	Wipe(hr)
+	Wipe(hr[:])
 
 	return nil
 }
@@ -75,20 +120,28 @@ func (s *Coffer) Init() error {
 View returns a snapshot of the contents of a Coffer inside a Buffer. As usual the Buffer should be destroyed as soon as possible after use by calling the Destroy method.
 */
 func (s *Coffer) View() (*Buffer, error) {
+	// Allocate before locking: NewBuffer may panic on resource exhaustion,
+	// and that must never happen while holding the coffer lock, since the
+	// panic path purges and re-locks this same coffer (deadlock).
+	b, err := NewBuffer(32)
+	if err != nil {
+		return nil, err
+	}
+
 	s.Lock()
 	defer s.Unlock()
 	if s.destroyed() {
+		b.Destroy()
 		return nil, ErrCofferExpired
 	}
-	b, _ := NewBuffer(32)
 
 	// data = hash(right) XOR left
-	h := Hash(s.right.Data())
+	h := hash32(s.right.Data())
 
 	for i := range b.Data() {
 		b.Data()[i] = h[i] ^ s.left.Data()[i]
 	}
-	Wipe(h)
+	Wipe(h[:])
 
 	return b, nil
 }
@@ -108,7 +161,7 @@ func (s *Coffer) Rekey() error {
 	}
 
 	// Hash the current right partition for later.
-	hashRightCurrent := Hash(s.right.Data())
+	hashRightCurrent := hash32(s.right.Data())
 
 	// new_right = current_right XOR buf32
 	for i := range s.right.Data() {
@@ -116,11 +169,12 @@ func (s *Coffer) Rekey() error {
 	}
 
 	// new_left = current_left XOR hash(current_right) XOR hash(new_right)
-	hashRightNew := Hash(s.right.Data())
+	hashRightNew := hash32(s.right.Data())
 	for i := range s.left.Data() {
 		s.left.Data()[i] ^= hashRightCurrent[i] ^ hashRightNew[i]
 	}
-	Wipe(hashRightNew)
+	Wipe(hashRightCurrent[:])
+	Wipe(hashRightNew[:])
 
 	return nil
 }

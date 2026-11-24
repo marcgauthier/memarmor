@@ -9,7 +9,10 @@ import (
 )
 
 func TestNewCoffer(t *testing.T) {
-	s := NewCoffer()
+	s, err := NewCoffer()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Attain a lock to halt the verify & rekey cycle.
 	s.Lock()
@@ -40,7 +43,10 @@ func TestNewCoffer(t *testing.T) {
 }
 
 func TestCofferInit(t *testing.T) {
-	s := NewCoffer()
+	s, err := NewCoffer()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Get the value stored inside.
 	view, err := s.View()
@@ -78,8 +84,43 @@ func TestCofferInit(t *testing.T) {
 	}
 }
 
+func TestCofferInitValue(t *testing.T) {
+	s, err := NewCoffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Destroy()
+
+	value := make([]byte, 32)
+	Scramble(value)
+	if err := s.InitValue(value); err != nil {
+		t.Fatal("unexpected error;", err)
+	}
+
+	view, err := s.View()
+	if err != nil {
+		t.Fatal("unexpected error")
+	}
+	if !bytes.Equal(view.Data(), value) {
+		t.Error("installed value does not round-trip")
+	}
+	view.Destroy()
+
+	if err := s.InitValue(make([]byte, 16)); err != ErrInvalidKeyLength {
+		t.Error("expected invalid-length error; got", err)
+	}
+
+	s.Destroy()
+	if err := s.InitValue(value); err != ErrCofferExpired {
+		t.Error("expected ErrCofferExpired; got", err)
+	}
+}
+
 func TestCofferView(t *testing.T) {
-	s := NewCoffer()
+	s, err := NewCoffer()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Get the value stored inside.
 	view, err := s.View()
@@ -114,7 +155,10 @@ func TestCofferView(t *testing.T) {
 }
 
 func TestCofferRekey(t *testing.T) {
-	s := NewCoffer()
+	s, err := NewCoffer()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// remember the value stored inside
 	view, err := s.View()
@@ -159,7 +203,10 @@ func TestCofferRekey(t *testing.T) {
 }
 
 func TestCofferDestroy(t *testing.T) {
-	s := NewCoffer()
+	s, err := NewCoffer()
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.Destroy()
 
 	// Check metadata flags.
@@ -188,7 +235,10 @@ func TestCofferConcurrent(t *testing.T) {
 	}
 	wg := &sync.WaitGroup{}
 
-	s := NewCoffer()
+	s, err := NewCoffer()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Destroy()
 
 	start := time.Now()

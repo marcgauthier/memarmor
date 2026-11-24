@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/awnumar/memcall"
+	"github.com/marcgauthier/memarmor/internal/memcall"
 )
 
 /*
@@ -17,41 +17,52 @@ This function should be called before the program terminates, or else the provid
 func Purge() {
 	var opErr error
 
-	func() {
-		// Halt the re-key cycle and prevent new enclaves or keys being created.
-		keyMtx.Lock()
-		defer keyMtx.Unlock()
-		if !key.Destroyed() {
-			key.Lock()
-			defer key.Unlock()
+	// Halt the re-key cycle and prevent new enclaves or keys being created.
+	keyMtx.Lock()
+	defer keyMtx.Unlock()
+
+	// A purge retires the session key entirely: drop any TPM-sealed
+	// copy so it can never unlock the old key again.
+	Wipe(sealedKey)
+	sealedKey = nil
+	keyLocked = false
+	tpmState = TPMUnused
+
+	// Destroy the session key explicitly instead of relying on its buffers
+	// happening to be in the global list.
+	if !key.Destroyed() {
+		if err := key.Destroy(); err != nil {
+			opErr = err
 		}
+	}
 
-		// Get a snapshot of existing Buffers.
-		snapshot := buffers.flush()
+	// Get a snapshot of existing Buffers.
+	snapshot := buffers.flush()
 
-		// Destroy them, performing the usual sanity checks.
-		for _, b := range snapshot {
-			if err := b.destroy(); err != nil {
-				if opErr == nil {
-					opErr = err
-				} else {
-					opErr = fmt.Errorf("%s; %s", opErr.Error(), err.Error())
-				}
-				// buffer destroy failed; wipe instead
-				b.Lock()
-				defer b.Unlock()
-				if !b.mutable {
-					if err := memcall.Protect(b.inner, memcall.ReadWrite()); err != nil {
-						// couldn't change it to mutable; we can't wipe it! (could this happen?)
-						// not sure what we can do at this point, just warn and move on
-						fmt.Fprintf(os.Stderr, "!WARNING: failed to wipe immutable data at address %p", &b.data)
-						continue // wipe in subprocess?
-					}
-				}
-				Wipe(b.data)
+	// Destroy them, performing the usual sanity checks.
+	for _, b := range snapshot {
+		if err := b.destroy(); err != nil {
+			if opErr == nil {
+				opErr = err
+			} else {
+				opErr = fmt.Errorf("%s; %s", opErr.Error(), err.Error())
 			}
+			// Buffer destruction failed; wipe what we can instead.
+			// Each buffer is unlocked before moving on.
+			b.Lock()
+			if !b.mutable {
+				if err := memcall.Protect(b.inner, memcall.ReadWrite()); err != nil {
+					// couldn't change it to mutable; we can't wipe it! (could this happen?)
+					// not sure what we can do at this point, just warn and move on
+					fmt.Fprintf(os.Stderr, "!WARNING: failed to wipe immutable data at address %p", &b.data)
+					b.Unlock()
+					continue
+				}
+			}
+			Wipe(b.data)
+			b.Unlock()
 		}
-	}()
+	}
 
 	// If we encountered an error, panic.
 	if opErr != nil {

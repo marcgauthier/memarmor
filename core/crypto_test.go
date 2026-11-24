@@ -111,6 +111,9 @@ func TestWipe(t *testing.T) {
 			t.Error("wipe unsuccessful")
 		}
 	}
+	// Empty and nil inputs must be safe no-ops.
+	Wipe(nil)
+	Wipe([]byte{})
 }
 
 func TestEncryptDecrypt(t *testing.T) {

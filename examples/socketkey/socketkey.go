@@ -22,7 +22,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/awnumar/memguard"
+	"github.com/marcgauthier/memarmor"
 )
 
 // Save the data here so we can compare it later. Obviously this leaks the secret.
@@ -37,34 +37,34 @@ func SocketKey(size int) {
 	// Create a server to listen on.
 	listener, err := net.Listen("tcp", "127.0.0.1:4128")
 	if err != nil {
-		memguard.SafePanic(err)
+		memarmor.SafePanic(err)
 	}
 	defer listener.Close()
 
 	// Catch signals and close the listener before terminating safely.
-	memguard.CatchSignal(func(s os.Signal) {
+	memarmor.CatchSignal(func(s os.Signal) {
 		fmt.Println("Received signal:", s.String())
 		listener.Close()
 	}, os.Interrupt, os.Kill)
 
 	// Purge the session before returning.
-	defer memguard.Purge()
+	defer memarmor.Purge()
 
 	// Create a client to connect to our server.
 	go func() {
 		// Connect to our server
 		addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:4128")
 		if err != nil {
-			memguard.SafePanic(err)
+			memarmor.SafePanic(err)
 		}
 		conn, err := net.DialTCP("tcp", nil, addr)
 		if err != nil {
-			memguard.SafePanic(err)
+			memarmor.SafePanic(err)
 		}
 		defer conn.Close()
 
 		// Create a buffer filled with random bytes
-		buf := memguard.NewBufferRandom(size)
+		buf := memarmor.NewBufferRandom(size)
 		defer buf.Destroy()
 
 		// Save a copy of the key for comparison later.
@@ -78,7 +78,7 @@ func SocketKey(size int) {
 		for total = 0; total < size; total += written {
 			written, err = conn.Write(buf.Bytes()[total:])
 			if err != nil {
-				memguard.SafePanic(err)
+				memarmor.SafePanic(err)
 			}
 		}
 	}()
@@ -86,13 +86,13 @@ func SocketKey(size int) {
 	// Accept connections from clients
 	conn, err := listener.Accept()
 	if err != nil {
-		memguard.SafePanic(err)
+		memarmor.SafePanic(err)
 	}
 
 	// Read the data directly into a guarded memory region
-	buf, err := memguard.NewBufferFromReader(conn, size)
+	buf, err := memarmor.NewBufferFromReader(conn, size)
 	if err != nil {
-		memguard.SafePanic(err)
+		memarmor.SafePanic(err)
 	}
 	defer buf.Destroy()
 	conn.Close()
@@ -101,7 +101,7 @@ func SocketKey(size int) {
 
 	// Compare the key to make sure it wasn't corrupted.
 	if !bytes.Equal(data, buf.Bytes()) {
-		memguard.SafePanic(fmt.Sprint("sent != received ::", data, buf.Bytes()))
+		memarmor.SafePanic(fmt.Sprint("sent != received ::", data, buf.Bytes()))
 	}
 
 	// Seal the key into an encrypted Enclave object.
@@ -113,7 +113,7 @@ func SocketKey(size int) {
 	// Decrypt the key into a new buffer.
 	buf, err = key.Open()
 	if err != nil {
-		memguard.SafePanic(err)
+		memarmor.SafePanic(err)
 	}
 
 	// fmt.Printf("Decrypted key: %#v\n", buf.Bytes())

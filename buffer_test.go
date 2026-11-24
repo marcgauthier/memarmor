@@ -1,4 +1,4 @@
-package memguard
+package memarmor
 
 import (
 	"bytes"
@@ -9,7 +9,6 @@ import (
 	"os"
 	"runtime"
 	"testing"
-	"unsafe"
 )
 
 func TestPtrSafetyWithGC(t *testing.T) {
@@ -897,14 +896,18 @@ func TestReader(t *testing.T) {
 }
 
 func TestString(t *testing.T) {
-	b := NewBufferRandom(32)
-	b.Melt()
+	b := NewBufferFromBytes([]byte("yellow submarine"))
 	s := b.String()
+	if s != "yellow submarine" {
+		t.Error("string content mismatch")
+	}
+	// Mutating the buffer must not change the snapshot.
+	b.Melt()
 	for i := range b.Bytes() {
 		b.Bytes()[i] = 'x'
-		if string(b.Bytes()) != s {
-			t.Error("string does not map same memory")
-		}
+	}
+	if s != "yellow submarine" {
+		t.Error("string aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	s = b.String()
@@ -912,7 +915,7 @@ func TestString(t *testing.T) {
 		t.Error("string should be empty")
 	}
 	b = newNullBuffer()
-	if s != "" {
+	if b.String() != "" {
 		t.Error("string should be empty")
 	}
 }
@@ -926,8 +929,9 @@ func TestUint16(t *testing.T) {
 	if len(u16) != 16 || cap(u16) != 16 {
 		t.Error("sizes incorrect")
 	}
-	if uintptr(unsafe.Pointer(&u16[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	u16[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(3)
@@ -938,8 +942,9 @@ func TestUint16(t *testing.T) {
 	if len(u16) != 1 || cap(u16) != 1 {
 		t.Error("sizes should be 1")
 	}
-	if uintptr(unsafe.Pointer(&u16[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	u16[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(1)
@@ -969,8 +974,9 @@ func TestUint32(t *testing.T) {
 	if len(u32) != 8 || cap(u32) != 8 {
 		t.Error("sizes incorrect")
 	}
-	if uintptr(unsafe.Pointer(&u32[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	u32[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(5)
@@ -981,8 +987,9 @@ func TestUint32(t *testing.T) {
 	if len(u32) != 1 || cap(u32) != 1 {
 		t.Error("sizes should be 1")
 	}
-	if uintptr(unsafe.Pointer(&u32[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	u32[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(3)
@@ -1012,8 +1019,9 @@ func TestUint64(t *testing.T) {
 	if len(u64) != 4 || cap(u64) != 4 {
 		t.Error("sizes incorrect")
 	}
-	if uintptr(unsafe.Pointer(&u64[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	u64[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(9)
@@ -1024,8 +1032,9 @@ func TestUint64(t *testing.T) {
 	if len(u64) != 1 || cap(u64) != 1 {
 		t.Error("sizes should be 1")
 	}
-	if uintptr(unsafe.Pointer(&u64[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	u64[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(7)
@@ -1055,8 +1064,9 @@ func TestInt8(t *testing.T) {
 	if len(i8) != 32 || cap(i8) != 32 {
 		t.Error("sizes incorrect")
 	}
-	if uintptr(unsafe.Pointer(&i8[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	i8[0] ^= 0x7f
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	if b.Int8() != nil {
@@ -1077,8 +1087,9 @@ func TestInt16(t *testing.T) {
 	if len(i16) != 16 || cap(i16) != 16 {
 		t.Error("sizes incorrect")
 	}
-	if uintptr(unsafe.Pointer(&i16[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	i16[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(3)
@@ -1089,8 +1100,9 @@ func TestInt16(t *testing.T) {
 	if len(i16) != 1 || cap(i16) != 1 {
 		t.Error("sizes should be 1")
 	}
-	if uintptr(unsafe.Pointer(&i16[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	i16[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(1)
@@ -1120,8 +1132,9 @@ func TestInt32(t *testing.T) {
 	if len(i32) != 8 || cap(i32) != 8 {
 		t.Error("sizes incorrect")
 	}
-	if uintptr(unsafe.Pointer(&i32[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	i32[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(5)
@@ -1132,8 +1145,9 @@ func TestInt32(t *testing.T) {
 	if len(i32) != 1 || cap(i32) != 1 {
 		t.Error("sizes should be 1")
 	}
-	if uintptr(unsafe.Pointer(&i32[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	i32[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(3)
@@ -1163,8 +1177,9 @@ func TestInt64(t *testing.T) {
 	if len(i64) != 4 || cap(i64) != 4 {
 		t.Error("sizes incorrect")
 	}
-	if uintptr(unsafe.Pointer(&i64[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	i64[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(9)
@@ -1175,8 +1190,9 @@ func TestInt64(t *testing.T) {
 	if len(i64) != 1 || cap(i64) != 1 {
 		t.Error("sizes should be 1")
 	}
-	if uintptr(unsafe.Pointer(&i64[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	i64[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("view aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(7)
@@ -1202,8 +1218,13 @@ func TestByteArray8(t *testing.T) {
 	if b == nil {
 		t.Error("got nil buffer")
 	}
-	if uintptr(unsafe.Pointer(&b.ByteArray8()[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	a := b.ByteArray8()
+	if a == nil {
+		t.Fatal("expected byte array")
+	}
+	a[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("array aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(7)
@@ -1228,8 +1249,13 @@ func TestByteArray16(t *testing.T) {
 	if b == nil {
 		t.Error("got nil buffer")
 	}
-	if uintptr(unsafe.Pointer(&b.ByteArray16()[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	a := b.ByteArray16()
+	if a == nil {
+		t.Fatal("expected byte array")
+	}
+	a[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("array aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(15)
@@ -1254,8 +1280,13 @@ func TestByteArray32(t *testing.T) {
 	if b == nil {
 		t.Error("got nil buffer")
 	}
-	if uintptr(unsafe.Pointer(&b.ByteArray32()[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	a := b.ByteArray32()
+	if a == nil {
+		t.Fatal("expected byte array")
+	}
+	a[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("array aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(31)
@@ -1280,8 +1311,13 @@ func TestByteArray64(t *testing.T) {
 	if b == nil {
 		t.Error("got nil buffer")
 	}
-	if uintptr(unsafe.Pointer(&b.ByteArray64()[0])) != uintptr(unsafe.Pointer(&b.Bytes()[0])) {
-		t.Error("pointer locations differ")
+	a := b.ByteArray64()
+	if a == nil {
+		t.Fatal("expected byte array")
+	}
+	a[0] ^= 0xff
+	if !bytes.Equal(b.Bytes(), make([]byte, b.Size())) {
+		t.Error("array aliases locked memory; expected a copy")
 	}
 	b.Destroy()
 	b = NewBuffer(63)
@@ -1298,5 +1334,122 @@ func TestByteArray64(t *testing.T) {
 	b = newNullBuffer()
 	if b.ByteArray64() != nil {
 		t.Error("should be nil")
+	}
+}
+
+func TestTypedViewCopies(t *testing.T) {
+	pattern := make([]byte, 64)
+	for i := range pattern {
+		pattern[i] = byte(i*3 + 1)
+	}
+	b := NewBuffer(64)
+	b.Copy(pattern)
+
+	i8 := b.Int8()
+	if len(i8) != 64 {
+		t.Fatal("sizes incorrect")
+	}
+	for i := range i8 {
+		if byte(i8[i]) != pattern[i] {
+			t.Fatal("int8 content mismatch")
+		}
+	}
+	if got := b.Uint16(); len(got) != 32 || got[0] != nativeOrder.Uint16(pattern[:2]) {
+		t.Error("uint16 content mismatch")
+	}
+	if got := b.Uint32(); len(got) != 16 || got[0] != nativeOrder.Uint32(pattern[:4]) {
+		t.Error("uint32 content mismatch")
+	}
+	if got := b.Uint64(); len(got) != 8 || got[0] != nativeOrder.Uint64(pattern[:8]) {
+		t.Error("uint64 content mismatch")
+	}
+	if got := b.Int16(); len(got) != 32 || got[0] != int16(nativeOrder.Uint16(pattern[:2])) {
+		t.Error("int16 content mismatch")
+	}
+	if got := b.Int32(); len(got) != 16 || got[0] != int32(nativeOrder.Uint32(pattern[:4])) {
+		t.Error("int32 content mismatch")
+	}
+	if got := b.Int64(); len(got) != 8 || got[0] != int64(nativeOrder.Uint64(pattern[:8])) {
+		t.Error("int64 content mismatch")
+	}
+	if s := b.String(); s != string(pattern) {
+		t.Error("string content mismatch")
+	}
+	if a := b.ByteArray8(); a == nil || *a != [8]byte(pattern[:8]) {
+		t.Error("bytearray8 content mismatch")
+	}
+	if a := b.ByteArray16(); a == nil || *a != [16]byte(pattern[:16]) {
+		t.Error("bytearray16 content mismatch")
+	}
+	if a := b.ByteArray32(); a == nil || *a != [32]byte(pattern[:32]) {
+		t.Error("bytearray32 content mismatch")
+	}
+	if a := b.ByteArray64(); a == nil || *a != [64]byte(pattern) {
+		t.Error("bytearray64 content mismatch")
+	}
+
+	// Detach: destroying the buffer leaves all copies intact.
+	u := b.Uint64()
+	a := b.ByteArray32()
+	s := b.String()
+	b.Destroy()
+	if u[0] != nativeOrder.Uint64(pattern[:8]) || *a != [32]byte(pattern[:32]) || s != string(pattern) {
+		t.Error("copies did not survive destroy")
+	}
+}
+
+func TestCopyOverflowPanics(t *testing.T) {
+	b := NewBuffer(8)
+	if !panics(func() { b.Copy(make([]byte, 9)) }) {
+		t.Error("expected panic on copy overflow")
+	}
+	if !panics(func() { b.CopyAt(4, make([]byte, 5)) }) {
+		t.Error("expected panic on copyat overflow")
+	}
+	if !panics(func() { b.CopyAt(9, []byte{1}) }) {
+		t.Error("expected panic on offset out of range")
+	}
+	if !panics(func() { b.CopyAt(-1, []byte{1}) }) {
+		t.Error("expected panic on negative offset")
+	}
+	// Exact fits are fine.
+	b.Copy(make([]byte, 8))
+	b.CopyAt(8, []byte{})
+	if !panics(func() { b.Move(make([]byte, 9)) }) {
+		t.Error("expected panic on move overflow")
+	}
+	if !panics(func() { b.MoveAt(4, make([]byte, 5)) }) {
+		t.Error("expected panic on moveat overflow")
+	}
+	// Dead buffers stay silent, never panic.
+	b.Destroy()
+	b.Copy(make([]byte, 99))
+	b.MoveAt(99, make([]byte, 99))
+	nb := newNullBuffer()
+	nb.CopyAt(4, make([]byte, 99))
+}
+
+func TestWithBytes(t *testing.T) {
+	b := NewBufferFromBytes([]byte("yellow submarine"))
+	var seen []byte
+	b.WithBytes(func(v []byte) {
+		seen = append([]byte{}, v...)
+		if !bytes.Equal(v, []byte("yellow submarine")) {
+			t.Error("view content mismatch")
+		}
+	})
+	if !bytes.Equal(seen, []byte("yellow submarine")) {
+		t.Error("callback did not run")
+	}
+	b.Destroy()
+	called := false
+	b.WithBytes(func([]byte) { called = true })
+	if called {
+		t.Error("callback must not run on destroyed buffer")
+	}
+	nb := newNullBuffer()
+	nb.WithBytes(func([]byte) { called = true })
+	if called {
+		t.Error("callback must not run on null buffer")
 	}
 }

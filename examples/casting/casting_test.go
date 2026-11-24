@@ -5,12 +5,12 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/awnumar/memguard"
+	"github.com/marcgauthier/memarmor"
 )
 
 func TestByteArray10(t *testing.T) {
 	b, a := ByteArray10()
-	memguard.ScrambleBytes(a[:])
+	memarmor.ScrambleBytes(a[:])
 	if !bytes.Equal(b.Bytes(), a[:]) {
 		t.Error("array describes incorrect memory region")
 	}
@@ -29,11 +29,11 @@ func TestUint64Array4(t *testing.T) {
 	b.Destroy()
 }
 
-func testSecureStruct(b *memguard.LockedBuffer, s *Secure, offset int, t *testing.T) {
+func testSecureStruct(b *memarmor.LockedBuffer, s *Secure, offset int, t *testing.T) {
 	if uintptr(unsafe.Pointer(&b.Bytes()[offset])) != uintptr(unsafe.Pointer(s)) {
 		t.Error("pointers don't match")
 	}
-	memguard.ScrambleBytes(b.Bytes()[offset : offset+32])
+	memarmor.ScrambleBytes(b.Bytes()[offset : offset+32])
 	if !bytes.Equal(b.Bytes()[offset:offset+32], s.Key[:]) {
 		t.Error("key doesn't match")
 	}

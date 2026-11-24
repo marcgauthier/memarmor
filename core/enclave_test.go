@@ -21,7 +21,7 @@ func TestNewEnclave(t *testing.T) {
 	}
 
 	// Verify the length of the ciphertext is correct.
-	if len(e.ciphertext) != len(data)+Overhead {
+	if len(e.ciphertext) != len(data)+EnclaveOverhead(DefaultCipher()) {
 		t.Error("ciphertext has unexpected length;", len(e.ciphertext))
 	}
 
@@ -47,7 +47,7 @@ func TestSeal(t *testing.T) {
 	}
 
 	// Do a sanity check on the length of the ciphertext.
-	if len(e.ciphertext) != 32+Overhead {
+	if len(e.ciphertext) != 32+EnclaveOverhead(DefaultCipher()) {
 		t.Error("ciphertext has unexpected length:", len(e.ciphertext))
 	}
 
@@ -116,7 +116,7 @@ func TestOpen(t *testing.T) {
 }
 
 func TestEnclaveSize(t *testing.T) {
-	if EnclaveSize(&Enclave{make([]byte, 1234)}) != 1234-Overhead {
+	if EnclaveSize(&Enclave{ciphertext: make([]byte, 1234)}) != 1234-Overhead {
 		t.Error("invalid enclave size")
 	}
 }

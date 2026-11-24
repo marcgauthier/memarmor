@@ -1,45 +1,56 @@
 <p align="center">
-  <img src="https://cdn.rawgit.com/awnumar/memguard/master/logo.svg" height="140" />
-  <h3 align="center">MemGuard</h3>
-  <p align="center">Software enclave for storage of sensitive information in memory.</p>
-  <p align="center">
-    <a href="https://github.com/awnumar/memguard/actions/workflows/ci.yml"><img src="https://github.com/awnumar/memguard/actions/workflows/ci.yml/badge.svg?branch=master"></a>
-    <a href="https://pkg.go.dev/github.com/awnumar/memguard?tab=doc"><img src="https://godoc.org/github.com/awnumar/memguard?status.svg"></a>
-  </p>
+  <img src="icon.png" height="140" />
+  <h3 align="center">memarmor</h3>
+  <p align="center">Hardened software enclave for sensitive data in Go memory.</p>
+  <p align="center"><sub>The Go gopher was designed by Renée French and is used under CC-BY 4.0. See <a href="https://go.dev/blog/gopher">the Go Gopher</a>.</sub></p>
 </p>
 
 ---
 
-This package attempts to reduce the likelihood of sensitive data being exposed when in memory. It aims to support all major operating systems and is written in pure Go.
+memarmor is a security-hardened memory-protection library for Go, derived
+from [memguard](https://github.com/awnumar/memguard). It keeps secrets
+encrypted and guarded while they sit in process memory, and assumes a
+stronger threat model than upstream: heap hygiene, hardware-backed keys,
+and authenticated container integrity.
+
+## Status
+
+Implemented and verified: the full test suite passes with `-race`, plus
+`go vet`, `gofmt`, benchmarks, and cross-compiles for Windows, macOS, and
+FreeBSD. The TPM seal backend is covered by backend tests and a
+hardware-gated integration test that runs where a TPM 2.0 is accessible.
 
 ## Features
 
-* Sensitive data is encrypted and authenticated in memory with XSalsa20Poly1305. The [scheme](https://spacetime.dev/encrypting-secrets-in-memory) used also [defends against cold-boot attacks](https://spacetime.dev/memory-retention-attacks).
-* Memory allocation bypasses the language runtime by [using system calls](https://github.com/awnumar/memcall) to query the kernel for resources directly. This avoids interference from the garbage-collector.
-* Buffers that store plaintext data are fortified with guard pages and canary values to detect spurious accesses and overflows.
-* Effort is taken to prevent sensitive data from touching the disk. This includes locking memory to prevent swapping and handling core dumps.
-* Kernel-level immutability is implemented so that attempted modification of protected regions results in an access violation.
-* Multiple endpoints provide session purging and safe termination capabilities as well as signal handling to prevent remnant data being left behind.
-* Side-channel attacks are mitigated against by making sure that the copying and comparison of data is done in constant-time.
+* Choice of authenticated cipher for sealed data: XSalsa20-Poly1305
+  (default) or AES-256-GCM-SIV (RFC 8452). Ciphertext is self-describing,
+  so either kind always opens.
+* TPM 2.0 integration: the session key is sealed to the platform TPM when
+  one is available, with optional PCR policy binding, and can be locked
+  (evicted from RAM) and unlocked on demand.
+* Per-enclave data keys: every sealed container uses a unique data key
+  wrapped by the versioned session key, isolating nonces across enclaves.
+* Authenticated streams: chunks are bound to their stream and position,
+  and closing a stream commits a length readers use to detect truncation.
+* Memory hygiene: runtime-guaranteed wipes, in-place decryption with no
+  heap plaintext copies, stack-only intermediate digests, and explicit
+  destruction of ciphertext containers.
+* Safer API surface: typed views return copies instead of aliasing locked
+  memory, copies fail loudly on overflow, and resource exhaustion returns
+  errors instead of panicking.
+* Vendored syscall and TPM layers: no dependency on external `memcall`
+  or `go-tpm` modules.
 
-Some features were inspired by [libsodium](https://github.com/jedisct1/libsodium), so credits to them.
+## Relation to memguard
 
-Full documentation and a complete overview of the API can be found [here](https://godoc.org/github.com/awnumar/memguard). Interesting and useful code samples can be found within the [examples](examples) subpackage.
+memarmor started from memguard and keeps its core architecture of locked
+buffers, sealed enclaves, guard pages, canaries, and session purging. All
+memguard license and attribution details are kept in
+[THIRD-PARTY-LICENSE](THIRD-PARTY-LICENSE).
 
-## Installation
+## License
 
-```
-$ go get github.com/awnumar/memguard
-```
+Copyright 2026 Marc Gauthier.
 
-API is experimental and may have unstable changes. You should pin a version. [[modules](https://github.com/golang/go/wiki/Modules)]
-
-## Contributing
-
-* Submitting program samples to [`./examples`](examples).
-* Reporting bugs, vulnerabilities, and any difficulties in using the API.
-* Writing useful security and crypto libraries that utilise memguard.
-* Implementing kernel-specific/cpu-specific protections.
-* Submitting performance improvements.
-
-Issues are for reporting bugs and for discussion on proposals. Pull requests should be made against master.
+memarmor is licensed under the Apache License, Version 2.0. See
+[LICENSE](LICENSE) for the full text.

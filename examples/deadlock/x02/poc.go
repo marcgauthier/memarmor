@@ -5,12 +5,12 @@ package x02
 import (
 	"fmt"
 
-	"github.com/awnumar/memguard"
+	"github.com/marcgauthier/memarmor"
 	"golang.org/x/sys/unix"
 )
 
 func POC() {
-	key := memguard.NewEnclaveRandom(32)
+	key := memarmor.NewEnclaveRandom(32)
 
 	var oldLimit unix.Rlimit
 	zeroLimit := unix.Rlimit{Cur: 0, Max: oldLimit.Max}

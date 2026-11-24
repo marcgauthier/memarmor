@@ -1,13 +1,24 @@
-package memguard
+package memarmor
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"os"
 	"unsafe"
 
-	"github.com/awnumar/memguard/core"
+	"github.com/marcgauthier/memarmor/core"
 )
+
+// nativeOrder decodes multi-byte integers the way the platform's native
+// casts would, so typed copies keep their values on any endianness.
+var nativeOrder = func() binary.ByteOrder {
+	var i uint16 = 1
+	if *(*byte)(unsafe.Pointer(&i)) == 1 {
+		return binary.LittleEndian
+	}
+	return binary.BigEndian
+}()
 
 /*
 LockedBuffer is a structure that holds raw sensitive data.
@@ -29,7 +40,9 @@ func newNullBuffer() *LockedBuffer {
 }
 
 /*
-NewBuffer creates a mutable data container of the specified size.
+NewBuffer creates a mutable data container of the specified size. It returns
+a null buffer for a non-positive size or when guarded memory cannot be
+allocated or locked.
 */
 func NewBuffer(size int) *LockedBuffer {
 	// Construct a Buffer of the specified size.
@@ -243,9 +256,19 @@ Seal takes a LockedBuffer object and returns its contents encrypted inside a sea
 If Seal is called on a destroyed buffer, a nil enclave is returned.
 */
 func (b *LockedBuffer) Seal() *Enclave {
-	e, err := core.Seal(b.Buffer)
+	return b.SealWithCipher(GetCipher())
+}
+
+/*
+SealWithCipher takes a LockedBuffer object and returns its contents encrypted inside a sealed Enclave object using the given cipher. The LockedBuffer is subsequently destroyed and its contents wiped.
+
+If SealWithCipher is called on a destroyed buffer, a nil enclave is returned.
+A nil enclave is also returned when memory resources are exhausted.
+*/
+func (b *LockedBuffer) SealWithCipher(c Cipher) *Enclave {
+	e, err := core.SealWithCipher(b.Buffer, c)
 	if err != nil {
-		if err == core.ErrBufferExpired {
+		if err == core.ErrBufferExpired || core.IsResourceError(err) {
 			return nil
 		}
 		core.Panic(err)
@@ -254,14 +277,14 @@ func (b *LockedBuffer) Seal() *Enclave {
 }
 
 /*
-Copy performs a time-constant copy into a LockedBuffer. Move is preferred if the source is not also a LockedBuffer or if the source is no longer needed.
+Copy copies src into a LockedBuffer. It panics if src does not fit. Move is preferred if the source is not also a LockedBuffer or if the source is no longer needed.
 */
 func (b *LockedBuffer) Copy(src []byte) {
 	b.CopyAt(0, src)
 }
 
 /*
-CopyAt performs a time-constant copy into a LockedBuffer at an offset. Move is preferred if the source is not also a LockedBuffer or if the source is no longer needed.
+CopyAt copies src into a LockedBuffer at an offset. It panics on an out-of-range offset or if src does not fit. Move is preferred if the source is not also a LockedBuffer or if the source is no longer needed.
 */
 func (b *LockedBuffer) CopyAt(offset int, src []byte) {
 	if !b.IsAlive() {
@@ -271,18 +294,25 @@ func (b *LockedBuffer) CopyAt(offset int, src []byte) {
 	b.Lock()
 	defer b.Unlock()
 
-	core.Copy(b.Bytes()[offset:], src)
+	dst := b.Bytes()
+	if offset < 0 || offset > len(dst) {
+		panic("<memarmor> copy offset out of range")
+	}
+	if len(src) > len(dst)-offset {
+		panic("<memarmor> copy overflows locked buffer")
+	}
+	core.Copy(dst[offset:], src)
 }
 
 /*
-Move performs a time-constant move into a LockedBuffer. The source is wiped after the bytes are copied.
+Move moves src into a LockedBuffer. It panics if src does not fit. The source is wiped after the bytes are copied.
 */
 func (b *LockedBuffer) Move(src []byte) {
 	b.MoveAt(0, src)
 }
 
 /*
-MoveAt performs a time-constant move into a LockedBuffer at an offset. The source is wiped after the bytes are copied.
+MoveAt moves src into a LockedBuffer at an offset. It panics on an out-of-range offset or if src does not fit. The source is wiped after the bytes are copied.
 */
 func (b *LockedBuffer) MoveAt(offset int, src []byte) {
 	if !b.IsAlive() {
@@ -292,7 +322,14 @@ func (b *LockedBuffer) MoveAt(offset int, src []byte) {
 	b.Lock()
 	defer b.Unlock()
 
-	core.Move(b.Bytes()[offset:], src)
+	dst := b.Bytes()
+	if offset < 0 || offset > len(dst) {
+		panic("<memarmor> move offset out of range")
+	}
+	if len(src) > len(dst)-offset {
+		panic("<memarmor> move overflows locked buffer")
+	}
+	core.Move(dst[offset:], src)
 }
 
 /*
@@ -329,6 +366,10 @@ func (b *LockedBuffer) Size() int {
 
 /*
 Destroy wipes and frees the underlying memory of a LockedBuffer. The LockedBuffer will not be accessible or usable after this calls is made.
+
+Destroy must not race with concurrent use of the buffer: no other goroutine
+may be inside Bytes, Reader, the typed views, WithBytes, or any mutating call
+while Destroy runs.
 */
 func (b *LockedBuffer) Destroy() {
 	b.Buffer.Destroy()
@@ -363,29 +404,50 @@ func (b *LockedBuffer) EqualTo(buf []byte) bool {
 */
 
 /*
-Bytes returns a byte slice referencing the protected region of memory.
+Bytes returns a byte slice referencing the protected region of memory. The
+slice is only valid while the buffer is alive: it must not be used after
+Destroy, and Destroy must not run concurrently with its use.
 */
 func (b *LockedBuffer) Bytes() []byte {
 	return b.Buffer.Data()
 }
 
 /*
-Reader returns a Reader object referencing the protected region of memory.
+WithBytes runs fn with the protected region while holding the buffer's read
+lock, so the view is stable for the call. The slice must not be retained
+after fn returns, and fn must not call back into operations that destroy or
+re-lock this buffer.
+*/
+func (b *LockedBuffer) WithBytes(fn func([]byte)) {
+	if !b.IsAlive() {
+		return
+	}
+	b.RLock()
+	defer b.RUnlock()
+	fn(b.Bytes())
+}
+
+/*
+Reader returns a Reader object referencing the protected region of memory. Same lifetime rules as Bytes.
 */
 func (b *LockedBuffer) Reader() *bytes.Reader {
 	return bytes.NewReader(b.Bytes())
 }
 
 /*
-String returns a string representation of the protected region of memory.
+String returns a copy of the protected region as a string.
 */
 func (b *LockedBuffer) String() string {
-	slice := b.Bytes()
-	return *(*string)(unsafe.Pointer(&slice))
+	if !b.IsAlive() {
+		return ""
+	}
+	b.RLock()
+	defer b.RUnlock()
+	return string(b.Bytes())
 }
 
 /*
-Uint16 returns a slice pointing to the protected region of memory with the data represented as a sequence of unsigned 16 bit integers. Its length will be half that of the byte slice, excluding any remaining part that doesn't form a complete uint16 value.
+Uint16 returns a copy of the protected region with the data represented as a sequence of unsigned 16 bit integers. Its length will be half that of the byte slice, excluding any remaining part that doesn't form a complete uint16 value.
 
 If called on a destroyed LockedBuffer, a nil slice will be returned.
 */
@@ -405,19 +467,16 @@ func (b *LockedBuffer) Uint16() []uint16 {
 		return nil
 	}
 
-	// Construct the new slice representation.
-	var sl = struct {
-		addr uintptr
-		len  int
-		cap  int
-	}{uintptr(unsafe.Pointer(&b.Bytes()[0])), size, size}
-
-	// Cast the representation to the correct type and return it.
-	return *(*[]uint16)(unsafe.Pointer(&sl))
+	// Decode a copy in native byte order.
+	out := make([]uint16, size)
+	for i := range out {
+		out[i] = nativeOrder.Uint16(b.Bytes()[i*2:])
+	}
+	return out
 }
 
 /*
-Uint32 returns a slice pointing to the protected region of memory with the data represented as a sequence of unsigned 32 bit integers. Its length will be one quarter that of the byte slice, excluding any remaining part that doesn't form a complete uint32 value.
+Uint32 returns a copy of the protected region with the data represented as a sequence of unsigned 32 bit integers. Its length will be one quarter that of the byte slice, excluding any remaining part that doesn't form a complete uint32 value.
 
 If called on a destroyed LockedBuffer, a nil slice will be returned.
 */
@@ -437,19 +496,16 @@ func (b *LockedBuffer) Uint32() []uint32 {
 		return nil
 	}
 
-	// Construct the new slice representation.
-	var sl = struct {
-		addr uintptr
-		len  int
-		cap  int
-	}{uintptr(unsafe.Pointer(&b.Bytes()[0])), size, size}
-
-	// Cast the representation to the correct type and return it.
-	return *(*[]uint32)(unsafe.Pointer(&sl))
+	// Decode a copy in native byte order.
+	out := make([]uint32, size)
+	for i := range out {
+		out[i] = nativeOrder.Uint32(b.Bytes()[i*4:])
+	}
+	return out
 }
 
 /*
-Uint64 returns a slice pointing to the protected region of memory with the data represented as a sequence of unsigned 64 bit integers. Its length will be one eighth that of the byte slice, excluding any remaining part that doesn't form a complete uint64 value.
+Uint64 returns a copy of the protected region with the data represented as a sequence of unsigned 64 bit integers. Its length will be one eighth that of the byte slice, excluding any remaining part that doesn't form a complete uint64 value.
 
 If called on a destroyed LockedBuffer, a nil slice will be returned.
 */
@@ -469,19 +525,16 @@ func (b *LockedBuffer) Uint64() []uint64 {
 		return nil
 	}
 
-	// Construct the new slice representation.
-	var sl = struct {
-		addr uintptr
-		len  int
-		cap  int
-	}{uintptr(unsafe.Pointer(&b.Bytes()[0])), size, size}
-
-	// Cast the representation to the correct type and return it.
-	return *(*[]uint64)(unsafe.Pointer(&sl))
+	// Decode a copy in native byte order.
+	out := make([]uint64, size)
+	for i := range out {
+		out[i] = nativeOrder.Uint64(b.Bytes()[i*8:])
+	}
+	return out
 }
 
 /*
-Int8 returns a slice pointing to the protected region of memory with the data represented as a sequence of signed 8 bit integers. If called on a destroyed LockedBuffer, a nil slice will be returned.
+Int8 returns a copy of the protected region with the data represented as a sequence of signed 8 bit integers. If called on a destroyed LockedBuffer, a nil slice will be returned.
 */
 func (b *LockedBuffer) Int8() []int8 {
 
@@ -493,19 +546,16 @@ func (b *LockedBuffer) Int8() []int8 {
 	b.RLock()
 	defer b.RUnlock()
 
-	// Construct the new slice representation.
-	var sl = struct {
-		addr uintptr
-		len  int
-		cap  int
-	}{uintptr(unsafe.Pointer(&b.Bytes()[0])), b.Size(), b.Size()}
-
-	// Cast the representation to the correct type and return it.
-	return *(*[]int8)(unsafe.Pointer(&sl))
+	// Copy out byte by byte.
+	out := make([]int8, b.Size())
+	for i := range out {
+		out[i] = int8(b.Bytes()[i])
+	}
+	return out
 }
 
 /*
-Int16 returns a slice pointing to the protected region of memory with the data represented as a sequence of signed 16 bit integers. Its length will be half that of the byte slice, excluding any remaining part that doesn't form a complete int16 value.
+Int16 returns a copy of the protected region with the data represented as a sequence of signed 16 bit integers. Its length will be half that of the byte slice, excluding any remaining part that doesn't form a complete int16 value.
 
 If called on a destroyed LockedBuffer, a nil slice will be returned.
 */
@@ -525,19 +575,16 @@ func (b *LockedBuffer) Int16() []int16 {
 		return nil
 	}
 
-	// Construct the new slice representation.
-	var sl = struct {
-		addr uintptr
-		len  int
-		cap  int
-	}{uintptr(unsafe.Pointer(&b.Bytes()[0])), size, size}
-
-	// Cast the representation to the correct type and return it.
-	return *(*[]int16)(unsafe.Pointer(&sl))
+	// Decode a copy in native byte order.
+	out := make([]int16, size)
+	for i := range out {
+		out[i] = int16(nativeOrder.Uint16(b.Bytes()[i*2:]))
+	}
+	return out
 }
 
 /*
-Int32 returns a slice pointing to the protected region of memory with the data represented as a sequence of signed 32 bit integers. Its length will be one quarter that of the byte slice, excluding any remaining part that doesn't form a complete int32 value.
+Int32 returns a copy of the protected region with the data represented as a sequence of signed 32 bit integers. Its length will be one quarter that of the byte slice, excluding any remaining part that doesn't form a complete int32 value.
 
 If called on a destroyed LockedBuffer, a nil slice will be returned.
 */
@@ -557,19 +604,16 @@ func (b *LockedBuffer) Int32() []int32 {
 		return nil
 	}
 
-	// Construct the new slice representation.
-	var sl = struct {
-		addr uintptr
-		len  int
-		cap  int
-	}{uintptr(unsafe.Pointer(&b.Bytes()[0])), size, size}
-
-	// Cast the representation to the correct type and return it.
-	return *(*[]int32)(unsafe.Pointer(&sl))
+	// Decode a copy in native byte order.
+	out := make([]int32, size)
+	for i := range out {
+		out[i] = int32(nativeOrder.Uint32(b.Bytes()[i*4:]))
+	}
+	return out
 }
 
 /*
-Int64 returns a slice pointing to the protected region of memory with the data represented as a sequence of signed 64 bit integers. Its length will be one eighth that of the byte slice, excluding any remaining part that doesn't form a complete int64 value.
+Int64 returns a copy of the protected region with the data represented as a sequence of signed 64 bit integers. Its length will be one eighth that of the byte slice, excluding any remaining part that doesn't form a complete int64 value.
 
 If called on a destroyed LockedBuffer, a nil slice will be returned.
 */
@@ -589,19 +633,16 @@ func (b *LockedBuffer) Int64() []int64 {
 		return nil
 	}
 
-	// Construct the new slice representation.
-	var sl = struct {
-		addr uintptr
-		len  int
-		cap  int
-	}{uintptr(unsafe.Pointer(&b.Bytes()[0])), size, size}
-
-	// Cast the representation to the correct type and return it.
-	return *(*[]int64)(unsafe.Pointer(&sl))
+	// Decode a copy in native byte order.
+	out := make([]int64, size)
+	for i := range out {
+		out[i] = int64(nativeOrder.Uint64(b.Bytes()[i*8:]))
+	}
+	return out
 }
 
 /*
-ByteArray8 returns a pointer to some 8 byte array. Care must be taken not to dereference the pointer and instead pass it around as-is.
+ByteArray8 returns a copy of the first 8 bytes as an array.
 
 The length of the buffer must be at least 8 bytes in size and the LockedBuffer should not be destroyed. In either of these cases a nil value is returned.
 */
@@ -620,12 +661,14 @@ func (b *LockedBuffer) ByteArray8() *[8]byte {
 		return nil
 	}
 
-	// Cast the representation to the correct type.
-	return (*[8]byte)(unsafe.Pointer(&b.Bytes()[0]))
+	// Copy into a fresh array; the pointer never aliases locked memory.
+	var out [8]byte
+	copy(out[:], b.Bytes()[:8])
+	return &out
 }
 
 /*
-ByteArray16 returns a pointer to some 16 byte array. Care must be taken not to dereference the pointer and instead pass it around as-is.
+ByteArray16 returns a copy of the first 16 bytes as an array.
 
 The length of the buffer must be at least 16 bytes in size and the LockedBuffer should not be destroyed. In either of these cases a nil value is returned.
 */
@@ -644,12 +687,14 @@ func (b *LockedBuffer) ByteArray16() *[16]byte {
 		return nil
 	}
 
-	// Cast the representation to the correct type.
-	return (*[16]byte)(unsafe.Pointer(&b.Bytes()[0]))
+	// Copy into a fresh array; the pointer never aliases locked memory.
+	var out [16]byte
+	copy(out[:], b.Bytes()[:16])
+	return &out
 }
 
 /*
-ByteArray32 returns a pointer to some 32 byte array. Care must be taken not to dereference the pointer and instead pass it around as-is.
+ByteArray32 returns a copy of the first 32 bytes as an array.
 
 The length of the buffer must be at least 32 bytes in size and the LockedBuffer should not be destroyed. In either of these cases a nil value is returned.
 */
@@ -668,12 +713,14 @@ func (b *LockedBuffer) ByteArray32() *[32]byte {
 		return nil
 	}
 
-	// Cast the representation to the correct type.
-	return (*[32]byte)(unsafe.Pointer(&b.Bytes()[0]))
+	// Copy into a fresh array; the pointer never aliases locked memory.
+	var out [32]byte
+	copy(out[:], b.Bytes()[:32])
+	return &out
 }
 
 /*
-ByteArray64 returns a pointer to some 64 byte array. Care must be taken not to dereference the pointer and instead pass it around as-is.
+ByteArray64 returns a copy of the first 64 bytes as an array.
 
 The length of the buffer must be at least 64 bytes in size and the LockedBuffer should not be destroyed. In either of these cases a nil value is returned.
 */
@@ -692,6 +739,8 @@ func (b *LockedBuffer) ByteArray64() *[64]byte {
 		return nil
 	}
 
-	// Cast the representation to the correct type.
-	return (*[64]byte)(unsafe.Pointer(&b.Bytes()[0]))
+	// Copy into a fresh array; the pointer never aliases locked memory.
+	var out [64]byte
+	copy(out[:], b.Bytes()[:64])
+	return &out
 }

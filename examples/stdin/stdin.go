@@ -20,12 +20,12 @@ import (
 	"errors"
 	"os"
 
-	"github.com/awnumar/memguard"
+	"github.com/marcgauthier/memarmor"
 )
 
 // ReadKeyFromStdin reads a key from standard inputs and returns it sealed inside an Enclave object.
-func ReadKeyFromStdin() (*memguard.Enclave, error) {
-	key, err := memguard.NewBufferFromReaderUntil(os.Stdin, '\n')
+func ReadKeyFromStdin() (*memarmor.Enclave, error) {
+	key, err := memarmor.NewBufferFromReaderUntil(os.Stdin, '\n')
 	if err != nil {
 		// error encountered before '\n' was reached
 		return nil, err

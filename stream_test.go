@@ -1,4 +1,4 @@
-package memguard
+package memarmor
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/awnumar/memguard/core"
+	"github.com/marcgauthier/memarmor/core"
 )
 
 func write(t *testing.T, s *Stream, b []byte) {
@@ -244,4 +244,137 @@ func BenchmarkStreamRead(b *testing.B) {
 	}
 
 	runtime.KeepAlive(s)
+}
+
+func TestStreamCloseFlush(t *testing.T) {
+	s := NewStream()
+	data := make([]byte, 2*StreamChunkSize+100)
+	ScrambleBytes(data)
+	ref := append([]byte{}, data...)
+	write(t, s, data)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if s.Size() != len(ref) {
+		t.Error("marker leaked into size:", s.Size())
+	}
+	c, err := s.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.EqualTo(ref) {
+		t.Error("data mismatch after close")
+	}
+	c.Destroy()
+	read(t, s, nil, io.EOF)
+	if err := s.Close(); err != nil {
+		t.Error("close is not idempotent:", err)
+	}
+	if _, err := s.Write([]byte("x")); err != ErrStreamClosed {
+		t.Error("expected closed error; got", err)
+	}
+}
+
+func TestStreamTruncation(t *testing.T) {
+	newClosed := func(t *testing.T) *Stream {
+		s := NewStream()
+		for _, msg := range [][]byte{[]byte("chunk-A-payload"), []byte("chunk-B-payload")} {
+			m := append([]byte{}, msg...)
+			write(t, s, m)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Dropping a data chunk shifts the marker into a data slot, where its
+	// marker-namespace seal fails authentication.
+	s := newClosed(t)
+	s.queue.Remove(s.queue.Back().Prev()) // drop chunk B, keep marker
+	c, err := s.Flush()
+	if err != core.ErrDecryptionFailed {
+		t.Error("expected auth error; got", err)
+	}
+	if !c.EqualTo([]byte("chunk-A-payload")) {
+		t.Error("partial data mismatch")
+	}
+	c.Destroy()
+
+	// Dropping only the marker is detected too.
+	s = newClosed(t)
+	s.queue.Remove(s.queue.Back())
+	if _, err := s.Flush(); err != io.ErrUnexpectedEOF {
+		t.Error("expected truncation error; got", err)
+	}
+
+	// Without Close there is nothing to check against: plain EOF.
+	s = NewStream()
+	write(t, s, append([]byte{}, []byte("chunk-A-payload")...))
+	c, err = s.Flush()
+	if err != nil {
+		t.Error(err)
+	}
+	c.Destroy()
+	read(t, s, nil, io.EOF)
+}
+
+func TestStreamReorder(t *testing.T) {
+	s := NewStream()
+	write(t, s, append([]byte{}, []byte("chunk-A-payload")...))
+	write(t, s, append([]byte{}, []byte("chunk-B-payload")...))
+	// Swap the two queued chunks.
+	s.queue.MoveAfter(s.queue.Front(), s.queue.Back())
+	read(t, s, nil, core.ErrDecryptionFailed)
+}
+
+func TestStreamTransplant(t *testing.T) {
+	s1, s2 := NewStream(), NewStream()
+	write(t, s1, append([]byte{}, []byte("chunk-A-payload")...))
+	write(t, s2, append([]byte{}, []byte("chunk-B-payload")...))
+	// Move s2's chunk behind s1's data.
+	s1.queue.PushBack(s2.queue.Remove(s2.queue.Front()))
+	read(t, s1, []byte("chunk-A-payload"), nil)
+	read(t, s1, nil, core.ErrDecryptionFailed)
+}
+
+func TestStreamDestroy(t *testing.T) {
+	s := NewStream()
+	m := make([]byte, 100)
+	ScrambleBytes(m)
+	write(t, s, m)
+	if _, err := s.Read(make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	s.Destroy()
+	if s.Size() != 0 {
+		t.Error("expected empty stream")
+	}
+	read(t, s, nil, io.EOF)
+	if _, err := s.Write([]byte("x")); err != ErrStreamClosed {
+		t.Error("expected closed error; got", err)
+	}
+}
+
+func TestStreamNextAfterPartial(t *testing.T) {
+	s := NewStream()
+	m := make([]byte, 100)
+	ScrambleBytes(m)
+	ref := append([]byte{}, m...)
+	write(t, s, m)
+	if _, err := s.Read(make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	nx, err := s.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nx.EqualTo(ref[10:]) {
+		t.Error("remainder mismatch")
+	}
+	if nx.IsMutable() {
+		t.Error("expected immutable chunk")
+	}
+	nx.Destroy()
+	read(t, s, nil, io.EOF)
 }

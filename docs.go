@@ -1,5 +1,5 @@
 /*
-Package memguard implements a secure software enclave for the storage of sensitive information in memory.
+Package memarmor implements a secure software enclave for the storage of sensitive information in memory.
 
 	package main
 
@@ -7,18 +7,18 @@ Package memguard implements a secure software enclave for the storage of sensiti
 		"fmt"
 		"os"
 
-		"github.com/awnumar/memguard"
+		"github.com/marcgauthier/memarmor"
 	)
 
 	func main() {
 		// Safely terminate in case of an interrupt signal
-		memguard.CatchInterrupt()
+		memarmor.CatchInterrupt()
 
 		// Purge the session when we return
-		defer memguard.Purge()
+		defer memarmor.Purge()
 
 		// Generate a key sealed inside an encrypted container
-		key := memguard.NewEnclaveRandom(32)
+		key := memarmor.NewEnclaveRandom(32)
 
 		// Passing the key off to another function
 		key = invert(key)
@@ -35,11 +35,11 @@ Package memguard implements a secure software enclave for the storage of sensiti
 		fmt.Println(keyBuf.Bytes())
 	}
 
-	func invert(key *memguard.Enclave) *memguard.Enclave {
+	func invert(key *memarmor.Enclave) *memarmor.Enclave {
 		// Decrypt the key into a local copy
 		b, err := key.Open()
 		if err != nil {
-			memguard.SafePanic(err)
+			memarmor.SafePanic(err)
 		}
 		defer b.Destroy() // Destroy the copy when we return
 
@@ -61,7 +61,7 @@ The general workflow is to store sensitive information in Enclaves when it is no
 
 If you need access to the data inside a LockedBuffer in a type not covered by any methods provided by this API, you can type-cast the allocation's memory to whatever type you want.
 
-	key := memguard.NewBuffer(32)
+	key := memarmor.NewBuffer(32)
 	keyArrayPtr := (*[32]byte)(unsafe.Pointer(&key.Bytes()[0])) // do not dereference
 
 This is of course an unsafe operation and so care must be taken to ensure that the cast is valid and does not result in memory unsafety. Further examples of code and interesting use-cases can be found in the examples subpackage.
@@ -69,22 +69,30 @@ This is of course an unsafe operation and so care must be taken to ensure that t
 Several functions exist to make the mass purging of data very easy. It is recommended to make use of them when appropriate.
 
 	// Start an interrupt handler that will clean up memory before exiting
-	memguard.CatchInterrupt()
+	memarmor.CatchInterrupt()
 
 	// Purge the session when returning from the main function of your program
-	defer memguard.Purge()
+	defer memarmor.Purge()
 
 	// Use the safe variants of exit functions provided in the stdlib
-	memguard.SafeExit(1)
-	memguard.SafePanic(err)
+	memarmor.SafeExit(1)
+	memarmor.SafePanic(err)
 
 	// Destroy LockedBuffers as soon as possible after using them
 	b, err := enclave.Open()
 	if err != nil {
-		memguard.SafePanic(err)
+		memarmor.SafePanic(err)
 	}
 	defer b.Destroy()
 
 Core dumps are disabled by default. If you absolutely require them, you can enable them by using unix.Setrlimit to set RLIMIT_CORE to an appropriate value.
+
+The sealing cipher can be switched between XSalsa20-Poly1305 and
+AES-256-GCM-SIV with SetCipher, either globally or per enclave. When a TPM
+2.0 is available the session key is sealed to it automatically; use
+LockSessionKey and UnlockSessionKey to evict the key from RAM between uses,
+and SetTPMSealPolicy to bind seals to a measured boot state. Streams should
+be closed with Close once writing finishes so readers can detect truncation,
+and destroyed with Destroy when abandoned early.
 */
-package memguard
+package memarmor

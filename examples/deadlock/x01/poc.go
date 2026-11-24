@@ -9,14 +9,14 @@ import (
 	"io"
 	"time"
 
-	"github.com/awnumar/memguard"
+	"github.com/marcgauthier/memarmor"
 	"lukechampine.com/frand"
 )
 
 func OpenEnclave(ctx context.Context) {
 	n := 10
 	data := make([][]byte, n)
-	enclaves := make([]*memguard.Enclave, n)
+	enclaves := make([]*memarmor.Enclave, n)
 	for i := range data {
 		data[i] = make([]byte, 32)
 		buf := make([]byte, 32)
@@ -24,7 +24,7 @@ func OpenEnclave(ctx context.Context) {
 			panic("failed to read random data")
 		}
 		copy(data[i], buf)
-		enclaves[i] = memguard.NewEnclave(buf)
+		enclaves[i] = memarmor.NewEnclave(buf)
 	}
 
 	threads := 20
@@ -48,7 +48,7 @@ func OpenEnclave(ctx context.Context) {
 	// fmt.Println(string(buf[:runtime.Stack(buf, true)]))
 }
 
-func openVerify(lock *memguard.Enclave, exp []byte) error {
+func openVerify(lock *memarmor.Enclave, exp []byte) error {
 	lb, err := lock.Open()
 	if err != nil {
 		return err
@@ -61,7 +61,7 @@ func openVerify(lock *memguard.Enclave, exp []byte) error {
 	return nil
 }
 
-func immediateOpen(ctx context.Context, lock *memguard.Enclave, exp []byte) {
+func immediateOpen(ctx context.Context, lock *memarmor.Enclave, exp []byte) {
 	c1 := make(chan error, 1)
 	go func() {
 		err := openVerify(lock, exp)
