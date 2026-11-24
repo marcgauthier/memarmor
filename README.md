@@ -15,6 +15,51 @@ encrypted and guarded while they sit in process memory, and assumes a
 stronger threat model than upstream: heap hygiene, hardware-backed keys,
 and authenticated container integrity.
 
+## Quick start
+
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/marcgauthier/memarmor"
+)
+
+func main() {
+	// Wipe everything on Ctrl-C / SIGTERM.
+	memarmor.CatchTermination()
+	defer memarmor.Purge()
+
+	// Optional: bind TPM seals to the measured boot state (PCR 7).
+	// Without this, seals are still bound to the TPM hardware.
+	memarmor.SetTPMSealPolicy([]int{7})
+
+	// Seal a secret string; the input is wiped.
+	secret := memarmor.NewEnclave([]byte("s3cr3t-token"))
+	defer secret.Destroy()
+
+	// Seal raw bytes under AES-256-GCM-SIV explicitly.
+	buf := memarmor.NewEnclaveWithCipher([]byte{0x01, 0x02}, memarmor.CipherAES256GCMSIV)
+	defer buf.Destroy()
+
+	// Open when needed, destroy right after use.
+	b, err := secret.Open()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("token:", b.String())
+	b.Destroy()
+
+	// Evict the session key from RAM between uses (needs a TPM seal).
+	if memarmor.TPMStatus() == memarmor.TPMSealed {
+		_ = memarmor.LockSessionKey()
+		// ... key is out of RAM here ...
+		_ = memarmor.UnlockSessionKey()
+	}
+}
+```
+
 ## Status
 
 Implemented and verified: the full test suite passes with `-race`, plus
@@ -49,6 +94,10 @@ memarmor started from memguard and keeps its core architecture of locked
 buffers, sealed enclaves, guard pages, canaries, and session purging. All
 memguard license and attribution details are kept in
 [THIRD-PARTY-LICENSE](THIRD-PARTY-LICENSE).
+
+## Acknowledgments
+
+Built with implementation assistance from OpenAI Codex and Meta Muse.
 
 ## License
 

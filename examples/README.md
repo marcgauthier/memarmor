@@ -24,10 +24,6 @@ Packages are able to import one another. This allows us to build up modules of f
 
 3. Add your program to the end of the [packages](#packages) section of this document.
 
-## Licencing
-
-You own your intellectual property and so you are free to choose any licence for your program. To do this, add a licence header to the top of your source files.
-
 ## Packages
 
 0. [`Apache-2.0`] [socketkey](socketkey) :: Streaming multi-threaded client->server transfer of secure data over a socket.
