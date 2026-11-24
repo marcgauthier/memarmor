@@ -5,13 +5,12 @@ package memcall
 import (
 	"errors"
 	"fmt"
-
-	"golang.org/x/sys/unix"
+	"syscall"
 )
 
 // Lock is a wrapper for mlock(2).
 func Lock(b []byte) error {
-	if err := unix.Mlock(b); err != nil {
+	if err := syscall.Mlock(b); err != nil {
 		return fmt.Errorf("<memcall> could not acquire lock on %p, limit reached? [Err: %s]", _getStartPtr(b), err)
 	}
 
@@ -20,7 +19,7 @@ func Lock(b []byte) error {
 
 // Unlock is a wrapper for munlock(2).
 func Unlock(b []byte) error {
-	if err := unix.Munlock(b); err != nil {
+	if err := syscall.Munlock(b); err != nil {
 		return fmt.Errorf("<memcall> could not free lock on %p [Err: %s]", _getStartPtr(b), err)
 	}
 
@@ -30,7 +29,7 @@ func Unlock(b []byte) error {
 // Alloc allocates a byte slice of length n and returns it.
 func Alloc(n int) ([]byte, error) {
 	// Allocate the memory.
-	b, err := unix.Mmap(-1, 0, n, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE|unix.MAP_ANON)
+	b, err := syscall.Mmap(-1, 0, n, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANON)
 	if err != nil {
 		return nil, fmt.Errorf("<memcall> could not allocate [Err: %s]", err)
 	}
@@ -53,7 +52,7 @@ func Free(b []byte) error {
 	wipe(b)
 
 	// Free the memory back to the kernel.
-	if err := unix.Munmap(b); err != nil {
+	if err := syscall.Munmap(b); err != nil {
 		return fmt.Errorf("<memcall> could not deallocate %p [Err: %s]", _getStartPtr(b), err)
 	}
 
@@ -64,17 +63,17 @@ func Free(b []byte) error {
 func Protect(b []byte, mpf MemoryProtectionFlag) error {
 	var prot int
 	if mpf.flag == ReadWrite().flag {
-		prot = unix.PROT_READ | unix.PROT_WRITE
+		prot = syscall.PROT_READ | syscall.PROT_WRITE
 	} else if mpf.flag == ReadOnly().flag {
-		prot = unix.PROT_READ
+		prot = syscall.PROT_READ
 	} else if mpf.flag == NoAccess().flag {
-		prot = unix.PROT_NONE
+		prot = syscall.PROT_NONE
 	} else {
 		return errors.New(ErrInvalidFlag)
 	}
 
 	// Change the protection value of the byte slice.
-	if err := unix.Mprotect(b, prot); err != nil {
+	if err := syscall.Mprotect(b, prot); err != nil {
 		return fmt.Errorf("<memcall> could not set %d on %p [Err: %s]", prot, _getStartPtr(b), err)
 	}
 
@@ -84,7 +83,7 @@ func Protect(b []byte, mpf MemoryProtectionFlag) error {
 // DisableCoreDumps disables core dumps on Unix systems.
 func DisableCoreDumps() error {
 	// Disable core dumps.
-	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0}); err != nil {
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}); err != nil {
 		return fmt.Errorf("<memcall> could not set rlimit [Err: %s]", err)
 	}
 

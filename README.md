@@ -85,8 +85,8 @@ hardware-gated integration test that runs where a TPM 2.0 is accessible.
 * Safer API surface: typed views return copies instead of aliasing locked
   memory, copies fail loudly on overflow, and resource exhaustion returns
   errors instead of panicking.
-* Vendored syscall and TPM layers: no dependency on external `memcall`
-  or `go-tpm` modules.
+* No external Go modules. The repository includes the crypto, syscall,
+  and TPM code it needs.
 
 ## Relation to memguard
 

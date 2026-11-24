@@ -15,10 +15,11 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: false
       - name: Build
         run: |
           go version
-          go get ./...
+          test "$(go list -m all)" = "$(go list -m)"
           go build -race -v ./...
       - name: Test
         run: go test -race -v ./...
@@ -33,10 +34,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: false
       - name: Build
         run: |
           go version
-          go get ./...
           go build -race -v ./...
       - name: Test
         run: go test -race -v ./...
@@ -51,12 +52,12 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: false
       - name: Install MinGW (for gcc)
         run: choco install -y mingw
       - name: Build
         run: |
           go version
-          go get ./...
           $env:CGO_ENABLED=1; go build -race -v ./...
       - name: Test
         run: |

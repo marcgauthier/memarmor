@@ -1,7 +1,5 @@
 package tpm2
 
-//go:generate stringer -trimprefix=TPM -type=TPMAlgID,TPMECCCurve,TPMCC,TPMRC,TPMEO,TPMST,TPMCap,TPMPT,TPMPTPCR,TPMHT,TPMHandle,TPMNT -output=constants_string.go constants.go
-
 import (
 
 	// Register the relevant hash implementations.

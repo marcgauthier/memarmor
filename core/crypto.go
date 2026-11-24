@@ -8,9 +8,9 @@ import (
 	"sync"
 	"unsafe"
 
-	gcmsiv "github.com/marcgauthier/aes-gcm-siv"
-	"golang.org/x/crypto/blake2b"
-	"golang.org/x/crypto/nacl/secretbox"
+	gcmsiv "github.com/marcgauthier/memarmor/internal/thirdparty/gcmsiv"
+	"github.com/marcgauthier/memarmor/internal/thirdparty/xcrypto/blake2b"
+	"github.com/marcgauthier/memarmor/internal/thirdparty/xcrypto/nacl/secretbox"
 )
 
 /*

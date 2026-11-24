@@ -5,24 +5,24 @@ package core
 import (
 	"testing"
 
-	"golang.org/x/sys/unix"
+	"github.com/marcgauthier/memarmor/internal/thirdparty/xsys/linux"
 )
 
 // TestResourceExhaustion drops the memlock limit to zero and verifies that
 // allocation failures surface as errors instead of panics, and that failed
 // allocations register nothing.
 func TestResourceExhaustion(t *testing.T) {
-	var old unix.Rlimit
-	if err := unix.Prlimit(0, unix.RLIMIT_MEMLOCK, nil, &old); err != nil {
+	var old linux.Rlimit
+	if err := linux.Prlimit(0, linux.RlimitMemlock, nil, &old); err != nil {
 		t.Skipf("cannot query memlock limit: %s", err)
 	}
-	zero := unix.Rlimit{Cur: 0, Max: old.Max}
-	if err := unix.Prlimit(0, unix.RLIMIT_MEMLOCK, &zero, nil); err != nil {
+	zero := linux.Rlimit{Cur: 0, Max: old.Max}
+	if err := linux.Prlimit(0, linux.RlimitMemlock, &zero, nil); err != nil {
 		t.Skipf("cannot lower memlock limit: %s", err)
 	}
 	defer func() {
-		restore := unix.Rlimit{Cur: old.Cur, Max: old.Max}
-		if err := unix.Prlimit(0, unix.RLIMIT_MEMLOCK, &restore, nil); err != nil {
+		restore := linux.Rlimit{Cur: old.Cur, Max: old.Max}
+		if err := linux.Prlimit(0, linux.RlimitMemlock, &restore, nil); err != nil {
 			t.Errorf("cannot restore memlock limit: %s", err)
 		}
 	}()

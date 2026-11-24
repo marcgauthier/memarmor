@@ -15,4 +15,6 @@ Excluded: `tpm` (TPM 1.2), examples, all test files and test-only helpers
 (including the simulator, which needs `go-tpm-tools`).
 
 Import paths were rewritten from `github.com/google/go-tpm/` to
-`github.com/awnumar/memguard/internal/tpm/`. No functional changes.
+`github.com/marcgauthier/memarmor/internal/tpm/`. TPM device polling uses
+in-tree platform bindings. The upstream `stringer` directive was removed
+from this snapshot.

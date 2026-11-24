@@ -5,23 +5,29 @@ package memcall
 import (
 	"errors"
 	"fmt"
+	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
-// Lock is a wrapper for windows.VirtualLock()
+var (
+	kernel32       = syscall.NewLazyDLL("kernel32.dll")
+	virtualAlloc   = kernel32.NewProc("VirtualAlloc")
+	virtualFree    = kernel32.NewProc("VirtualFree")
+	virtualProtect = kernel32.NewProc("VirtualProtect")
+)
+
+// Lock is a wrapper for syscall.VirtualLock()
 func Lock(b []byte) error {
-	if err := windows.VirtualLock(_getPtr(b), uintptr(len(b))); err != nil {
+	if err := syscall.VirtualLock(uintptr(_getStartPtr(b)), uintptr(len(b))); err != nil {
 		return fmt.Errorf("<memcall> could not acquire lock on %p, limit reached? [Err: %s]", _getStartPtr(b), err)
 	}
 
 	return nil
 }
 
-// Unlock is a wrapper for windows.VirtualUnlock()
+// Unlock is a wrapper for syscall.VirtualUnlock()
 func Unlock(b []byte) error {
-	if err := windows.VirtualUnlock(_getPtr(b), uintptr(len(b))); err != nil {
+	if err := syscall.VirtualUnlock(uintptr(_getStartPtr(b)), uintptr(len(b))); err != nil {
 		return fmt.Errorf("<memcall> could not free lock on %p [Err: %s]", _getStartPtr(b), err)
 	}
 
@@ -31,8 +37,8 @@ func Unlock(b []byte) error {
 // Alloc allocates a byte slice of length n and returns it.
 func Alloc(n int) ([]byte, error) {
 	// Allocate the memory.
-	ptr, err := windows.VirtualAlloc(_zero, uintptr(n), 0x1000|0x2000, 0x4)
-	if err != nil {
+	ptr, _, err := virtualAlloc.Call(0, uintptr(n), 0x1000|0x2000, 0x4)
+	if ptr == 0 {
 		return nil, fmt.Errorf("<memcall> could not allocate [Err: %s]", err)
 	}
 
@@ -57,7 +63,7 @@ func Free(b []byte) error {
 	wipe(b)
 
 	// Free the memory back to the kernel.
-	if err := windows.VirtualFree(_getPtr(b), uintptr(0), 0x8000); err != nil {
+	if ok, _, err := virtualFree.Call(uintptr(_getStartPtr(b)), 0, 0x8000); ok == 0 {
 		return fmt.Errorf("<memcall> could not deallocate %p [Err: %s]", _getStartPtr(b), err)
 	}
 
@@ -78,7 +84,7 @@ func Protect(b []byte, mpf MemoryProtectionFlag) error {
 	}
 
 	var oldProtect uint32
-	if err := windows.VirtualProtect(_getPtr(b), uintptr(len(b)), uint32(prot), &oldProtect); err != nil {
+	if ok, _, err := virtualProtect.Call(uintptr(_getStartPtr(b)), uintptr(len(b)), uintptr(prot), uintptr(unsafe.Pointer(&oldProtect))); ok == 0 {
 		return fmt.Errorf("<memcall> could not set %d on %p [Err: %s]", prot, _getStartPtr(b), err)
 	}
 

@@ -7,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/marcgauthier/memarmor"
-	"lukechampine.com/frand"
 )
 
 func OpenEnclave(ctx context.Context) {
@@ -35,7 +35,7 @@ func OpenEnclave(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				default:
-					j := frand.Intn(n)
+					j := mathrand.IntN(n)
 					immediateOpen(ctx, enclaves[j], data[j])
 				}
 			}
