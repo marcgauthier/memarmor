@@ -1,9 +1,11 @@
 <p align="center">
   <img src="icon.png" width="256" alt="memarmor logo" />
-  <h3 align="center">memarmor</h3>
-  <p align="center">Hardened software enclave for sensitive data in Go memory.</p>
-  <p align="center"><sub>The Go gopher was designed by Renée French and is used under CC-BY 4.0. See <a href="https://go.dev/blog/gopher">the Go Gopher</a>.</sub></p>
 </p>
+
+<details align="center">
+<summary><sub>Icon credit</sub></summary>
+<p><sub>The Go gopher was designed by Renée French and is used under CC-BY 4.0. See <a href="https://go.dev/blog/gopher">the Go Gopher</a>.</sub></p>
+</details>
 
 ---
 
